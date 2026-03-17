@@ -1,0 +1,8 @@
+numpy
+pandas
+pyarrow
+sentence-transformers
+huggingface_hub
+transformers
+accelerate
+safetensors
