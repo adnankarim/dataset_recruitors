@@ -17,9 +17,9 @@ from numpy.lib.format import open_memmap
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_SPLITS_DIR = str(BASE_DIR / "data")
 DEFAULT_OUTPUT_DIR = str(BASE_DIR / "output")
-DEFAULT_MODEL = "pplx-embed-v1-0.6B"
+DEFAULT_MODEL = "pplx-embed-v1-4b"
 DEFAULT_API_URL = "https://api.perplexity.ai/v1/embeddings"
-DEFAULT_HF_MODEL_ID = "perplexity-ai/pplx-embed-v1-0.6B"
+DEFAULT_HF_MODEL_ID = "perplexity-ai/pplx-embed-v1-4b"
 DEFAULT_HF_CACHE_DIR = str(BASE_DIR / "hf-cache")
 SPLIT_NAMES = ("train", "valid", "test")
 TEXT_SPECS = (
@@ -68,6 +68,13 @@ def parse_mrl_dims(value: str, embedding_dim: int) -> list[int]:
     if embedding_dim not in dims:
         dims.append(embedding_dim)
     return dims
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("Expected a positive integer.")
+    return parsed
 
 
 def load_split_frames(splits_dir: Path) -> dict[str, pd.DataFrame]:
@@ -502,11 +509,11 @@ def main() -> None:
     parser.add_argument("--splits-dir", default=DEFAULT_SPLITS_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--dimensions", type=int, default=1024)
+    parser.add_argument("--dimensions", type=positive_int, default=1024)
     parser.add_argument("--mrl-dims", default="256,512,1024")
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--chunk-size", type=int, default=10000)
-    parser.add_argument("--timeout-seconds", type=int, default=120)
+    parser.add_argument("--batch-size", type=positive_int, default=64, help="Embedding request batch size.")
+    parser.add_argument("--chunk-size", type=positive_int, default=10000)
+    parser.add_argument("--timeout-seconds", type=positive_int, default=120)
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
     parser.add_argument("--backend", choices=["api", "hf-local"], default="hf-local")
     parser.add_argument("--hf-model-id", default=DEFAULT_HF_MODEL_ID)

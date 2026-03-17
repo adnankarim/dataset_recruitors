@@ -102,10 +102,17 @@ Force CPU:
 .\.venv\Scripts\python.exe run_pplx_embedding_pipeline.py --device cpu
 ```
 
+Set an explicit embedding batch size:
+
+```powershell
+.\.venv\Scripts\python.exe run_pplx_embedding_pipeline.py --batch-size 128
+```
+
 ## Defaults
 
 - backend: `hf-local`
-- model: `perplexity-ai/pplx-embed-v1-0.6B`
+- model: `perplexity-ai/pplx-embed-v1-4b`
+- embedding dimensions: `1024`
 - data dir: `./data`
 - output dir: `./output`
 - cache dir: `./hf-cache`
