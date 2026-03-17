@@ -108,10 +108,18 @@ Set an explicit embedding batch size:
 .\.venv\Scripts\python.exe run_pplx_embedding_pipeline.py --batch-size 128
 ```
 
+Switch between model sizes:
+
+```powershell
+.\.venv\Scripts\python.exe run_pplx_embedding_pipeline.py --model-size 0.6b
+.\.venv\Scripts\python.exe run_pplx_embedding_pipeline.py --model-size 4b
+```
+
 ## Defaults
 
 - backend: `hf-local`
-- model: `perplexity-ai/pplx-embed-v1-4b`
+- model: `perplexity-ai/pplx-embed-v1-0.6B`
+- model size preset: `0.6b`
 - embedding dimensions: `1024`
 - data dir: `./data`
 - output dir: `./output`

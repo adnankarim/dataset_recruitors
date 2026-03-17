@@ -17,10 +17,20 @@ from numpy.lib.format import open_memmap
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_SPLITS_DIR = str(BASE_DIR / "data")
 DEFAULT_OUTPUT_DIR = str(BASE_DIR / "output")
-DEFAULT_MODEL = "pplx-embed-v1-4b"
+DEFAULT_MODEL = "pplx-embed-v1-0.6B"
 DEFAULT_API_URL = "https://api.perplexity.ai/v1/embeddings"
-DEFAULT_HF_MODEL_ID = "perplexity-ai/pplx-embed-v1-4b"
+DEFAULT_HF_MODEL_ID = "perplexity-ai/pplx-embed-v1-0.6B"
 DEFAULT_HF_CACHE_DIR = str(BASE_DIR / "hf-cache")
+MODEL_SIZE_PRESETS = {
+    "0.6b": {
+        "model": "pplx-embed-v1-0.6B",
+        "hf_model_id": "perplexity-ai/pplx-embed-v1-0.6B",
+    },
+    "4b": {
+        "model": "pplx-embed-v1-4b",
+        "hf_model_id": "perplexity-ai/pplx-embed-v1-4b",
+    },
+}
 SPLIT_NAMES = ("train", "valid", "test")
 TEXT_SPECS = (
     ("query", "query_text"),
@@ -75,6 +85,13 @@ def positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("Expected a positive integer.")
     return parsed
+
+
+def resolve_model_config(model_size: str | None, model: str, hf_model_id: str) -> tuple[str, str]:
+    if not model_size:
+        return model, hf_model_id
+    preset = MODEL_SIZE_PRESETS[model_size]
+    return preset["model"], preset["hf_model_id"]
 
 
 def load_split_frames(splits_dir: Path) -> dict[str, pd.DataFrame]:
@@ -508,6 +525,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build Perplexity embedding stores and cosine feature datasets from the behavioral interaction splits.")
     parser.add_argument("--splits-dir", default=DEFAULT_SPLITS_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--model-size", choices=sorted(MODEL_SIZE_PRESETS), help="Preset for Perplexity embedding model size.")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--dimensions", type=positive_int, default=1024)
     parser.add_argument("--mrl-dims", default="256,512,1024")
@@ -542,12 +560,13 @@ def main() -> None:
 
     api_key = os.getenv("PPLX_API_KEY") or os.getenv("PERPLEXITY_API_KEY")
     mrl_dims = parse_mrl_dims(args.mrl_dims, args.dimensions)
+    selected_model, selected_hf_model_id = resolve_model_config(args.model_size, args.model, args.hf_model_id)
     hf_encoder = None
     hf_model_path = None
     resolved_device = resolve_device(args.device)
 
     if not args.mock_embeddings and args.backend == "hf-local":
-        hf_model_path = download_hf_model(args.hf_model_id, Path(args.hf_cache_dir))
+        hf_model_path = download_hf_model(selected_hf_model_id, Path(args.hf_cache_dir))
         hf_encoder = load_local_sentence_transformer(hf_model_path, resolved_device)
 
     frames = load_split_frames(splits_dir)
@@ -561,7 +580,7 @@ def main() -> None:
             text_column=column,
             role=role,
             output_dir=store_dir,
-            model=args.model,
+            model=selected_model,
             dimensions=args.dimensions,
             batch_size=args.batch_size,
             timeout_seconds=args.timeout_seconds,
@@ -601,7 +620,8 @@ def main() -> None:
     manifest = {
         "splits_dir": str(splits_dir.resolve()),
         "output_dir": str(output_dir.resolve()),
-        "model": args.model,
+        "model": selected_model,
+        "model_size": args.model_size or "custom",
         "backend": args.backend,
         "dimensions": args.dimensions,
         "mrl_dims": mrl_dims,
@@ -609,7 +629,7 @@ def main() -> None:
         "chunk_size": args.chunk_size,
         "mock_embeddings": args.mock_embeddings,
         "api_url": args.api_url,
-        "hf_model_id": args.hf_model_id,
+        "hf_model_id": selected_hf_model_id,
         "hf_model_path": hf_model_path,
         "hf_cache_dir": str(Path(args.hf_cache_dir).resolve()),
         "device": resolved_device,
