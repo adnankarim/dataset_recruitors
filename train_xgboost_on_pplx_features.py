@@ -119,44 +119,16 @@ def infer_checkpoint_rounds_from_booster(booster) -> int:
     return len(booster.get_dump())
 
 
-def infer_checkpoint_rounds(model: xgb.XGBClassifier) -> int:
-    return infer_checkpoint_rounds_from_booster(model.get_booster())
+def infer_checkpoint_rounds(model) -> int:
+    booster = model.get_booster() if hasattr(model, "get_booster") else model
+    return infer_checkpoint_rounds_from_booster(booster)
 
 
 def latest_checkpoint(checkpoint_dir: Path) -> Path | None:
-    checkpoint_paths = sorted(checkpoint_dir.glob("model_round_*.json"))
+    checkpoint_paths = sorted(checkpoint_dir.glob("model*.json"))
     if not checkpoint_paths:
         return None
     return checkpoint_paths[-1]
-
-
-class PeriodicCheckpointCallback(xgb.callback.TrainingCallback):
-    def __init__(self, checkpoint_dir: Path, state_path: Path, interval: int) -> None:
-        self.checkpoint_dir = checkpoint_dir
-        self.state_path = state_path
-        self.interval = interval
-
-    def _save_state(self, model, epoch: int, evals_log: dict) -> None:
-        checkpoint_path = self.checkpoint_dir / f"model_round_{epoch:05d}.json"
-        model.save_model(str(checkpoint_path))
-        state = {
-            "updated_at": utc_now(),
-            "checkpoint_round": int(epoch),
-            "checkpoint_model_path": str(checkpoint_path.resolve()),
-            "evals_result": sanitize_metric_history(evals_log),
-        }
-        write_json(self.state_path, state)
-
-    def after_iteration(self, model, epoch: int, evals_log: dict) -> bool:
-        iteration = epoch + 1
-        if iteration % self.interval == 0:
-            self._save_state(model, iteration, evals_log)
-        return False
-
-    def after_training(self, model):
-        iteration = infer_checkpoint_rounds_from_booster(model)
-        self._save_state(model, iteration, {})
-        return model
 
 
 def read_split(feature_dir: Path, split_name: str) -> pd.DataFrame:
@@ -394,12 +366,11 @@ def save_metrics_table(metrics_by_split: dict[str, dict], output_path: Path) -> 
 
 
 def save_feature_importance(
-    model: xgb.XGBClassifier,
+    booster,
     feature_names: list[str],
     output_dir: Path,
     top_k: int,
 ) -> pd.DataFrame:
-    booster = model.get_booster()
     gain_scores = booster.get_score(importance_type="gain")
     weight_scores = booster.get_score(importance_type="weight")
     cover_scores = booster.get_score(importance_type="cover")
@@ -612,9 +583,8 @@ def plot_confusion_matrix(
     plt.close(fig)
 
 
-def build_classifier(args: argparse.Namespace, n_estimators: int, num_classes: int) -> xgb.XGBClassifier:
-    classifier_kwargs = {
-        "n_estimators": n_estimators,
+def build_train_params(args: argparse.Namespace, num_classes: int) -> dict:
+    params = {
         "objective": "binary:logistic" if num_classes == 2 else "multi:softprob",
         "eval_metric": ["logloss", "auc", "aucpr"] if num_classes == 2 else ["mlogloss", "merror"],
         "learning_rate": args.learning_rate,
@@ -625,14 +595,14 @@ def build_classifier(args: argparse.Namespace, n_estimators: int, num_classes: i
         "reg_alpha": args.reg_alpha,
         "reg_lambda": args.reg_lambda,
         "tree_method": args.tree_method,
-        "random_state": args.seed,
+        "seed": args.seed,
         "n_jobs": args.n_jobs,
     }
     if args.device:
-        classifier_kwargs["device"] = args.device
+        params["device"] = args.device
     if num_classes > 2:
-        classifier_kwargs["num_class"] = num_classes
-    return xgb.XGBClassifier(**classifier_kwargs)
+        params["num_class"] = num_classes
+    return params
 
 
 def training_summary(
@@ -668,6 +638,25 @@ def training_summary(
         "feature_importance_path": str(importance_path.resolve()),
         "metrics": metrics_by_split,
     }
+
+
+def build_dmatrix(
+    features: pd.DataFrame,
+    labels: np.ndarray | None,
+    weights: np.ndarray | None,
+    feature_names: list[str],
+) -> xgb.DMatrix:
+    dmatrix = xgb.DMatrix(features, label=labels, weight=weights, feature_names=feature_names)
+    return dmatrix
+
+
+def predict_probabilities(booster, features: pd.DataFrame, feature_names: list[str], num_classes: int) -> np.ndarray:
+    dmatrix = xgb.DMatrix(features, feature_names=feature_names)
+    predictions = booster.predict(dmatrix)
+    if num_classes == 2:
+        predictions = np.asarray(predictions).reshape(-1)
+        return np.stack([1.0 - predictions, predictions], axis=1)
+    return np.asarray(predictions)
 
 
 def main() -> None:
@@ -800,7 +789,7 @@ def main() -> None:
             raise FileNotFoundError(
                 f"--resume was requested, but no checkpoint model was found in {checkpoints_dir.resolve()}"
             )
-        loaded_model = xgb.XGBClassifier()
+        loaded_model = xgb.Booster()
         loaded_model.load_model(str(checkpoint_path))
         completed_rounds = infer_checkpoint_rounds(loaded_model)
         checkpoint_state = load_json_if_exists(checkpoint_state_path) or {}
@@ -808,42 +797,49 @@ def main() -> None:
 
     remaining_rounds = max(args.num_boost_round - completed_rounds, 0)
 
-    classifier = build_classifier(args, max(remaining_rounds, 1), len(class_names))
-    callbacks: list = [PeriodicCheckpointCallback(checkpoints_dir, checkpoint_state_path, args.checkpoint_interval)]
-    if args.early_stopping_rounds > 0:
-        callbacks.append(xgb.callback.EarlyStopping(rounds=args.early_stopping_rounds, save_best=True))
+    feature_names = encoded_frames["train"].columns.tolist()
+    dtrain = build_dmatrix(
+        encoded_frames["train"], encoded_labels_by_split["train"], training_weights_by_split["train"], feature_names
+    )
+    dvalid = build_dmatrix(
+        encoded_frames["valid"], encoded_labels_by_split["valid"], training_weights_by_split["valid"], feature_names
+    )
 
+    train_params = build_train_params(args, len(class_names))
+    evals_result: dict = {}
     if remaining_rounds > 0:
-        fit_kwargs = {
-            "sample_weight": training_weights_by_split["train"],
-            "eval_set": [
-                (encoded_frames["train"], encoded_labels_by_split["train"]),
-                (encoded_frames["valid"], encoded_labels_by_split["valid"]),
-            ],
-            "verbose": False,
-            "callbacks": callbacks,
-        }
-        if loaded_model is not None:
-            fit_kwargs["xgb_model"] = loaded_model
-        if training_weights_by_split["train"] is not None or training_weights_by_split["valid"] is not None:
-            fit_kwargs["sample_weight_eval_set"] = [training_weights_by_split["train"], training_weights_by_split["valid"]]
-        classifier.fit(
-            encoded_frames["train"],
-            encoded_labels_by_split["train"],
-            **fit_kwargs,
+        callbacks = [
+            xgb.callback.TrainingCheckPoint(
+                directory=str(checkpoints_dir),
+                iterations=args.checkpoint_interval,
+                name="model",
+                as_pickle=False,
+            )
+        ]
+        if args.early_stopping_rounds > 0:
+            callbacks.append(xgb.callback.EarlyStopping(rounds=args.early_stopping_rounds, save_best=True))
+        booster = xgb.train(
+            params=train_params,
+            dtrain=dtrain,
+            num_boost_round=remaining_rounds,
+            evals=[(dtrain, "train"), (dvalid, "valid")],
+            evals_result=evals_result,
+            verbose_eval=False,
+            callbacks=callbacks,
+            xgb_model=loaded_model,
         )
     else:
         if loaded_model is None:
             raise ValueError("Training requested zero remaining rounds without a loaded checkpoint.")
-        classifier = loaded_model
+        booster = loaded_model
 
-    current_history = classifier.evals_result() if remaining_rounds > 0 else {}
-    merged_history = merge_histories(previous_history, sanitize_metric_history(current_history))
+    current_history = sanitize_metric_history(evals_result) if remaining_rounds > 0 else {}
+    merged_history = merge_histories(previous_history, current_history)
     final_model_path = models_dir / "xgboost_model_final.json"
-    classifier.save_model(str(final_model_path))
+    booster.save_model(str(final_model_path))
 
     final_checkpoint_path = latest_checkpoint(checkpoints_dir)
-    current_rounds = infer_checkpoint_rounds(classifier)
+    current_rounds = infer_checkpoint_rounds(booster)
     checkpoint_state = {
         "updated_at": utc_now(),
         "completed_rounds": current_rounds,
@@ -851,7 +847,7 @@ def main() -> None:
         "history": merged_history,
         "latest_checkpoint_path": None if final_checkpoint_path is None else str(final_checkpoint_path.resolve()),
         "final_model_path": str(final_model_path.resolve()),
-        "best_iteration": int(getattr(classifier, "best_iteration", current_rounds - 1))
+        "best_iteration": int(getattr(booster, "best_iteration", current_rounds - 1))
         if current_rounds > 0
         else None,
     }
@@ -861,7 +857,7 @@ def main() -> None:
     labeled_predictions: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for split_name in ("train", "valid", "test"):
         y_true = encoded_labels_by_split[split_name]
-        y_prob = classifier.predict_proba(encoded_frames[split_name])
+        y_prob = predict_probabilities(booster, encoded_frames[split_name], feature_names, len(class_names))
         save_prediction_frame(
             predictions_dir / f"{split_name}_predictions.parquet",
             metadata_by_split[split_name],
@@ -883,7 +879,7 @@ def main() -> None:
     save_metrics_table(metrics_by_split, artifacts_dir / "metrics.csv")
     write_json(artifacts_dir / "metrics.json", metrics_by_split)
 
-    save_feature_importance(classifier, feature_columns, plots_dir, args.plot_top_k)
+    save_feature_importance(booster, feature_columns, plots_dir, args.plot_top_k)
     plot_learning_curves(merged_history, plots_dir / "learning_curves.png")
     plot_label_distribution(labels_by_split, plots_dir / "label_distribution.png")
     plot_roc_curves(
