@@ -142,7 +142,8 @@ Detected target classes in this dataset:
 
 By default the trainer:
 
-- uses only the Perplexity cosine feature columns as model inputs
+- uses only raw query, user, and candidate embeddings as model inputs
+- concatenates query, user, and candidate embedding prefixes into one feature vector
 - trains a multiclass XGBoost classifier on the `label` column
 - leaves class-imbalance handling off unless you enable it
 - checkpoints the model during training
@@ -167,6 +168,12 @@ Train with class-imbalance handling enabled:
 .\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling balanced-sample-weight
 ```
 
+Train with a smaller raw embedding prefix:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --embedding-prefix-dim 256
+```
+
 Train with class-imbalance handling explicitly off:
 
 ```powershell
@@ -183,6 +190,18 @@ Example with custom run directory and boosting rounds:
 
 ```powershell
 .\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --run-dir training_runs\xgboost_exp_01 --num-boost-round 2000 --checkpoint-interval 100
+```
+
+Run raw embedding ablations across prefix dimensions:
+
+```bash
+bash run_xgboost_ablation.sh
+```
+
+Custom ablation dimensions:
+
+```bash
+bash run_xgboost_ablation.sh --dims 128,256,512,1024
 ```
 
 ### Training Outputs
@@ -216,7 +235,9 @@ Inside the run directory, for example `training_runs/xgboost_pplx/`:
 ### Default Modeling Choices
 
 - objective: multiclass classification with `label`
-- input features: only `pplx_qc_*`, `pplx_uc_*`, `pplx_qu_*`, and `pplx_quc_*`
+- feature source: raw embeddings from `output/store/*.npy`
+- input features: concatenated `query`, `user`, and `candidate` embedding prefixes
+- default embedding prefix dim: `1024`
 - class imbalance handling: `off` by default, optional `balanced-sample-weight`
 - evaluation split for model selection: `valid`
 - predictions: class probabilities plus top predicted label

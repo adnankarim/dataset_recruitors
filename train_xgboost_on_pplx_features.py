@@ -31,18 +31,11 @@ from sklearn.preprocessing import label_binarize
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_FEATURE_DIR = str(BASE_DIR / "output" / "feature_splits")
+DEFAULT_STORE_DIR = str(BASE_DIR / "output" / "store")
 DEFAULT_RUN_DIR = str(BASE_DIR / "training_runs" / "xgboost_pplx")
-DEFAULT_FEATURE_COLUMNS = (
-    "pplx_qc_cosine_256,pplx_uc_cosine_256,pplx_qu_cosine_256,pplx_quc_cosine_256,"
-    "pplx_qc_cosine_512,pplx_uc_cosine_512,pplx_qu_cosine_512,pplx_quc_cosine_512,"
-    "pplx_qc_cosine_1024,pplx_uc_cosine_1024,pplx_qu_cosine_1024,pplx_quc_cosine_1024"
-)
-DEFAULT_DROP_COLUMNS = (
-    "event_id,user_id,search_id,profil_id,user_profile_text,query_text,candidate_text,"
-    "reason_codes,split"
-)
 DEFAULT_METADATA_COLUMNS = "event_id,user_id,search_id,profil_id,split"
 MIN_SAMPLE_WEIGHT = 1e-6
+EMBEDDING_ID_COLUMNS = ("query_text_id", "user_text_id", "candidate_text_id")
 
 
 def utc_now() -> str:
@@ -138,6 +131,54 @@ def read_split(feature_dir: Path, split_name: str) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing feature split: {path}")
     return pd.read_parquet(path)
+
+
+def load_embedding_store(store_dir: Path) -> dict[str, np.ndarray]:
+    store = {}
+    for role in ("query", "user", "candidate"):
+        path = store_dir / f"{role}_embeddings.int8.npy"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing embedding store file: {path}")
+        store[role] = np.load(path, mmap_mode="r")
+    return store
+
+
+def build_raw_embedding_feature_frame(
+    df: pd.DataFrame,
+    embedding_store: dict[str, np.ndarray],
+    embedding_prefix_dim: int,
+) -> pd.DataFrame:
+    query_ids = df["query_text_id"].to_numpy(dtype=np.int32)
+    user_ids = df["user_text_id"].to_numpy(dtype=np.int32)
+    candidate_ids = df["candidate_text_id"].to_numpy(dtype=np.int32)
+
+    max_dim = int(embedding_store["query"].shape[1])
+    if embedding_prefix_dim <= 0 or embedding_prefix_dim > max_dim:
+        raise ValueError(f"embedding_prefix_dim must be in 1..{max_dim}, got {embedding_prefix_dim}")
+
+    q = np.asarray(embedding_store["query"][query_ids, :embedding_prefix_dim], dtype=np.float32)
+    u = np.asarray(embedding_store["user"][user_ids, :embedding_prefix_dim], dtype=np.float32)
+    c = np.asarray(embedding_store["candidate"][candidate_ids, :embedding_prefix_dim], dtype=np.float32)
+    matrix = np.concatenate([q, u, c], axis=1)
+
+    columns = (
+        [f"query_emb_{index:04d}" for index in range(embedding_prefix_dim)]
+        + [f"user_emb_{index:04d}" for index in range(embedding_prefix_dim)]
+        + [f"candidate_emb_{index:04d}" for index in range(embedding_prefix_dim)]
+    )
+    return pd.DataFrame(matrix, columns=columns, index=df.index)
+
+
+def split_labels_and_metadata(
+    df: pd.DataFrame,
+    target_column: str,
+    weight_column: str | None,
+    metadata_columns: list[str],
+) -> tuple[np.ndarray | None, np.ndarray | None, pd.DataFrame]:
+    labels = df[target_column].to_numpy() if target_column in df.columns else None
+    weights = df[weight_column].to_numpy(dtype=np.float32) if weight_column and weight_column in df.columns else None
+    metadata = df[[column for column in metadata_columns if column in df.columns]].copy()
+    return labels, weights, metadata
 
 
 def engineer_time_features(df: pd.DataFrame, time_column: str) -> pd.DataFrame:
@@ -676,6 +717,9 @@ def training_summary(
         "weight_column": args.weight_col,
         "training_weight_policy": "class-balanced loss weighting with optional label_weight",
         "evaluation_weight_policy": "unweighted metrics and unweighted validation early stopping",
+        "feature_source": "raw query/user/candidate embedding prefixes",
+        "store_dir": str(Path(args.store_dir).resolve()),
+        "embedding_prefix_dim": args.embedding_prefix_dim,
         "class_names": class_names,
         "num_classes": len(class_names),
         "num_boost_round": args.num_boost_round,
@@ -684,9 +728,6 @@ def training_summary(
         "class_imbalance_handling": args.class_imbalance_handling,
         "class_weight_map": class_weight_map,
         "weight_sanitization": weight_sanitization,
-        "selected_feature_columns": parse_csv_list(args.feature_cols),
-        "drop_columns": parse_csv_list(args.drop_cols),
-        "time_column": args.time_col,
         "feature_count": len(feature_columns),
         "feature_columns_path": str((Path(args.run_dir) / "artifacts" / "feature_columns.json").resolve()),
         "categorical_columns": categorical_columns,
@@ -721,13 +762,12 @@ def main() -> None:
         description="Train and evaluate an XGBoost classifier on output/feature_splits parquet files."
     )
     parser.add_argument("--feature-dir", default=DEFAULT_FEATURE_DIR)
+    parser.add_argument("--store-dir", default=DEFAULT_STORE_DIR)
     parser.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
     parser.add_argument("--target-col", default="label")
     parser.add_argument("--weight-col", default="label_weight")
-    parser.add_argument("--feature-cols", default=DEFAULT_FEATURE_COLUMNS)
-    parser.add_argument("--drop-cols", default=DEFAULT_DROP_COLUMNS)
     parser.add_argument("--metadata-cols", default=DEFAULT_METADATA_COLUMNS)
-    parser.add_argument("--time-col", default="searched_at")
+    parser.add_argument("--embedding-prefix-dim", type=positive_int, default=1024)
     parser.add_argument("--num-boost-round", type=positive_int, default=1200)
     parser.add_argument("--early-stopping-rounds", type=positive_int, default=100)
     parser.add_argument("--checkpoint-interval", type=positive_int, default=50)
@@ -767,10 +807,9 @@ def main() -> None:
     train_df = read_split(feature_dir, "train")
     valid_df = read_split(feature_dir, "valid")
     test_df = read_split(feature_dir, "test")
+    embedding_store = load_embedding_store(Path(args.store_dir))
 
     metadata_columns = parse_csv_list(args.metadata_cols)
-    drop_columns = parse_csv_list(args.drop_cols)
-    selected_feature_columns = parse_csv_list(args.feature_cols)
 
     raw_frames = {"train": train_df, "valid": valid_df, "test": test_df}
     feature_frames: dict[str, pd.DataFrame] = {}
@@ -778,16 +817,20 @@ def main() -> None:
     weights_by_split: dict[str, np.ndarray | None] = {}
     metadata_by_split: dict[str, pd.DataFrame] = {}
     for split_name, frame in raw_frames.items():
-        features, labels, weights, metadata = split_labels_and_features(
+        for required_column in EMBEDDING_ID_COLUMNS:
+            if required_column not in frame.columns:
+                raise ValueError(f"Missing required embedding ID column '{required_column}' in split '{split_name}'.")
+        labels, weights, metadata = split_labels_and_metadata(
             frame,
             target_column=args.target_col,
             weight_column=args.weight_col,
             metadata_columns=metadata_columns,
-            drop_columns=drop_columns,
-            selected_feature_columns=selected_feature_columns,
-            time_column=args.time_col,
         )
-        feature_frames[split_name] = features
+        feature_frames[split_name] = build_raw_embedding_feature_frame(
+            frame,
+            embedding_store=embedding_store,
+            embedding_prefix_dim=args.embedding_prefix_dim,
+        )
         labels_by_split[split_name] = labels
         weights_by_split[split_name] = weights
         metadata_by_split[split_name] = metadata
@@ -831,11 +874,10 @@ def main() -> None:
         artifacts_dir / "preprocessing.json",
         {
             "created_at": utc_now(),
-            "selected_feature_columns": selected_feature_columns,
-            "drop_columns": drop_columns,
             "metadata_columns": metadata_columns,
             "categorical_columns_encoded": categorical_columns,
-            "time_column": args.time_col,
+            "feature_source": "raw query/user/candidate embedding prefixes",
+            "embedding_prefix_dim": args.embedding_prefix_dim,
             "feature_count": len(feature_columns),
             "class_names": class_names,
             "weight_sanitization": weight_sanitization,

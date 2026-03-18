@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 FEATURE_DIR="${FEATURE_DIR:-$ROOT_DIR/output/feature_splits}"
+STORE_DIR="${STORE_DIR:-$ROOT_DIR/output/store}"
 RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/ablation_runs}"
 TIMESTAMP="${TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 ABLATION_DIR="${ABLATION_DIR:-$RUN_ROOT/$TIMESTAMP}"
@@ -18,17 +19,43 @@ EARLY_STOPPING_ROUNDS="${EARLY_STOPPING_ROUNDS:-100}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-50}"
 SEED="${SEED:-42}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+DIMS="256,512,1024"
+IMBALANCE_MODES="off,balanced-sample-weight"
 
-ALL_COSINE="pplx_qc_cosine_256,pplx_uc_cosine_256,pplx_qu_cosine_256,pplx_quc_cosine_256,pplx_qc_cosine_512,pplx_uc_cosine_512,pplx_qu_cosine_512,pplx_quc_cosine_512,pplx_qc_cosine_1024,pplx_uc_cosine_1024,pplx_qu_cosine_1024,pplx_quc_cosine_1024"
-DIM_256="pplx_qc_cosine_256,pplx_uc_cosine_256,pplx_qu_cosine_256,pplx_quc_cosine_256"
-DIM_512="pplx_qc_cosine_512,pplx_uc_cosine_512,pplx_qu_cosine_512,pplx_quc_cosine_512"
-DIM_1024="pplx_qc_cosine_1024,pplx_uc_cosine_1024,pplx_qu_cosine_1024,pplx_quc_cosine_1024"
-QC_ONLY="pplx_qc_cosine_256,pplx_qc_cosine_512,pplx_qc_cosine_1024"
-UC_ONLY="pplx_uc_cosine_256,pplx_uc_cosine_512,pplx_uc_cosine_1024"
-QU_ONLY="pplx_qu_cosine_256,pplx_qu_cosine_512,pplx_qu_cosine_1024"
-QUC_ONLY="pplx_quc_cosine_256,pplx_quc_cosine_512,pplx_quc_cosine_1024"
-QC_UC="pplx_qc_cosine_256,pplx_uc_cosine_256,pplx_qc_cosine_512,pplx_uc_cosine_512,pplx_qc_cosine_1024,pplx_uc_cosine_1024"
-QC_QUC="pplx_qc_cosine_256,pplx_quc_cosine_256,pplx_qc_cosine_512,pplx_quc_cosine_512,pplx_qc_cosine_1024,pplx_quc_cosine_1024"
+usage() {
+  cat <<EOF
+Usage: bash run_xgboost_ablation.sh [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight]
+
+Options:
+  --dims               Comma-separated embedding prefix dimensions to evaluate. Default: 256,512,1024
+  --imbalance-modes    Comma-separated imbalance modes. Default: off,balanced-sample-weight
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dims)
+      DIMS="$2"
+      shift 2
+      ;;
+    --imbalance-modes)
+      IMBALANCE_MODES="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+IFS=',' read -r -a DIM_VALUES <<<"$DIMS"
+IFS=',' read -r -a IMBALANCE_VALUES <<<"$IMBALANCE_MODES"
 
 mkdir -p "$RUNS_DIR" "$LOGS_DIR" "$REPORTS_DIR" "$CALIBRATION_DIR"
 
@@ -38,33 +65,22 @@ SUMMARY_MD="$REPORTS_DIR/ablation_summary.md"
 CALIBRATION_INDEX="$REPORTS_DIR/calibration_index.md"
 
 cat >"$MANIFEST_PATH" <<EOF
-experiment_name	class_imbalance_handling	feature_columns	run_dir	log_path	status
-EOF
-
-readarray -t EXPERIMENT_SPECS <<EOF
-all_cosine_off	off	$ALL_COSINE
-all_cosine_balanced	balanced-sample-weight	$ALL_COSINE
-dim256_balanced	balanced-sample-weight	$DIM_256
-dim512_balanced	balanced-sample-weight	$DIM_512
-dim1024_balanced	balanced-sample-weight	$DIM_1024
-qc_only_balanced	balanced-sample-weight	$QC_ONLY
-uc_only_balanced	balanced-sample-weight	$UC_ONLY
-qu_only_balanced	balanced-sample-weight	$QU_ONLY
-quc_only_balanced	balanced-sample-weight	$QUC_ONLY
-qc_uc_balanced	balanced-sample-weight	$QC_UC
-qc_quc_balanced	balanced-sample-weight	$QC_QUC
+experiment_name	class_imbalance_handling	embedding_prefix_dim	run_dir	log_path	status
 EOF
 
 echo "Ablation root: $ABLATION_DIR"
 echo "Using feature dir: $FEATURE_DIR"
+echo "Using store dir:   $STORE_DIR"
 echo "Using python: $PYTHON_BIN"
+echo "Embedding dims: $DIMS"
+echo "Imbalance modes: $IMBALANCE_MODES"
 
 failures=()
 
 run_experiment() {
   local name="$1"
   local imbalance="$2"
-  local features="$3"
+  local prefix_dim="$3"
   local run_dir="$RUNS_DIR/$name"
   local log_path="$LOGS_DIR/$name.log"
   local calibration_target="$CALIBRATION_DIR/${name}_calibration.png"
@@ -76,14 +92,15 @@ run_experiment() {
   echo "============================================================"
   echo "Running experiment: $name"
   echo "Class imbalance:   $imbalance"
-  echo "Features:          $features"
+  echo "Embedding dim:     $prefix_dim"
   echo "Run dir:           $run_dir"
   echo "============================================================"
 
   if "$PYTHON_BIN" "$ROOT_DIR/train_xgboost_on_pplx_features.py" \
     --feature-dir "$FEATURE_DIR" \
+    --store-dir "$STORE_DIR" \
     --run-dir "$run_dir" \
-    --feature-cols "$features" \
+    --embedding-prefix-dim "$prefix_dim" \
     --class-imbalance-handling "$imbalance" \
     --device "$DEVICE" \
     --num-boost-round "$NUM_BOOST_ROUND" \
@@ -100,12 +117,17 @@ run_experiment() {
   fi
 
   printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "$name" "$imbalance" "$features" "$run_dir" "$log_path" "$status" >>"$MANIFEST_PATH"
+    "$name" "$imbalance" "$prefix_dim" "$run_dir" "$log_path" "$status" >>"$MANIFEST_PATH"
 }
 
-for spec in "${EXPERIMENT_SPECS[@]}"; do
-  IFS=$'\t' read -r name imbalance features <<<"$spec"
-  run_experiment "$name" "$imbalance" "$features"
+for dim in "${DIM_VALUES[@]}"; do
+  dim="$(echo "$dim" | xargs)"
+  [[ -n "$dim" ]] || continue
+  for imbalance in "${IMBALANCE_VALUES[@]}"; do
+    imbalance="$(echo "$imbalance" | xargs)"
+    [[ -n "$imbalance" ]] || continue
+    run_experiment "rawdim${dim}_${imbalance//-/_}" "$imbalance" "$dim"
+  done
 done
 
 "$PYTHON_BIN" - "$MANIFEST_PATH" "$SUMMARY_CSV" "$SUMMARY_MD" "$CALIBRATION_INDEX" <<'PY'
@@ -122,8 +144,7 @@ calibration_index = Path(sys.argv[4])
 rows = []
 with manifest_path.open("r", encoding="utf-8", newline="") as handle:
     reader = csv.DictReader(handle, delimiter="\t")
-    for row in reader:
-        rows.append(row)
+    rows.extend(reader)
 
 summary_rows = []
 for row in rows:
@@ -136,7 +157,7 @@ for row in rows:
         "experiment_name": row["experiment_name"],
         "status": row["status"],
         "class_imbalance_handling": row["class_imbalance_handling"],
-        "feature_columns": row["feature_columns"],
+        "embedding_prefix_dim": row["embedding_prefix_dim"],
         "run_dir": row["run_dir"],
         "log_path": row["log_path"],
         "calibration_plot": str(calibration_path) if calibration_path.exists() else "",
@@ -145,35 +166,29 @@ for row in rows:
     if metrics_path.exists():
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         for split_name in ("valid", "test", "train"):
-            split_metrics = metrics.get(split_name, {})
-            for key, value in split_metrics.items():
+            for key, value in metrics.get(split_name, {}).items():
                 record[f"{split_name}_{key}"] = value
 
     if summary_path.exists():
         run_summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        record["class_names"] = ",".join(run_summary.get("class_names", []))
         record["feature_count"] = run_summary.get("feature_count")
-        record["class_weight_map"] = json.dumps(run_summary.get("class_weight_map"), ensure_ascii=True)
+        record["class_names"] = ",".join(run_summary.get("class_names", []))
 
     summary_rows.append(record)
 
-sort_keys = [
-    "valid_f1_macro",
-    "valid_balanced_accuracy",
-    "valid_accuracy",
-]
-
-def sort_value(row, key):
-    value = row.get(key)
-    if value in (None, "", "None"):
-        return float("-inf")
-    return float(value)
-
-summary_rows.sort(key=lambda row: tuple(sort_value(row, key) for key in sort_keys), reverse=True)
+summary_rows.sort(
+    key=lambda row: (
+        float(row.get("valid_f1_macro", float("-inf"))),
+        float(row.get("valid_balanced_accuracy", float("-inf"))),
+        float(row.get("valid_accuracy", float("-inf"))),
+    ),
+    reverse=True,
+)
 
 fieldnames = [
     "experiment_name",
     "status",
+    "embedding_prefix_dim",
     "class_imbalance_handling",
     "feature_count",
     "valid_f1_macro",
@@ -185,8 +200,6 @@ fieldnames = [
     "test_accuracy",
     "test_logloss",
     "class_names",
-    "class_weight_map",
-    "feature_columns",
     "run_dir",
     "log_path",
     "calibration_plot",
@@ -199,30 +212,25 @@ with summary_csv.open("w", encoding="utf-8", newline="") as handle:
         writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 with summary_md.open("w", encoding="utf-8") as handle:
-    handle.write("# XGBoost Ablation Summary\n\n")
+    handle.write("# Raw Embedding XGBoost Ablation Summary\n\n")
     if summary_rows:
         best = summary_rows[0]
         handle.write("## Best Validation Run\n\n")
         handle.write(f"- Experiment: `{best['experiment_name']}`\n")
+        handle.write(f"- Embedding prefix dim: `{best['embedding_prefix_dim']}`\n")
         handle.write(f"- Class imbalance handling: `{best['class_imbalance_handling']}`\n")
         handle.write(f"- Validation macro F1: `{best.get('valid_f1_macro', '')}`\n")
         handle.write(f"- Validation balanced accuracy: `{best.get('valid_balanced_accuracy', '')}`\n")
         handle.write(f"- Test macro F1: `{best.get('test_f1_macro', '')}`\n")
         handle.write(f"- Run directory: `{best['run_dir']}`\n\n")
-
-        handle.write("## All Runs\n\n")
-        handle.write("| Experiment | Status | Imbalance | Valid F1 Macro | Valid Balanced Acc | Test F1 Macro | Test Balanced Acc |\n")
-        handle.write("| --- | --- | --- | ---: | ---: | ---: | ---: |\n")
+        handle.write("| Experiment | Dim | Imbalance | Valid F1 Macro | Valid Balanced Acc | Test F1 Macro | Test Balanced Acc |\n")
+        handle.write("| --- | ---: | --- | ---: | ---: | ---: | ---: |\n")
         for row in summary_rows:
             handle.write(
-                f"| {row['experiment_name']} | {row['status']} | {row['class_imbalance_handling']} "
+                f"| {row['experiment_name']} | {row['embedding_prefix_dim']} | {row['class_imbalance_handling']} "
                 f"| {row.get('valid_f1_macro', '')} | {row.get('valid_balanced_accuracy', '')} "
                 f"| {row.get('test_f1_macro', '')} | {row.get('test_balanced_accuracy', '')} |\n"
             )
-        handle.write("\n")
-        handle.write("## Files\n\n")
-        handle.write(f"- CSV summary: `{summary_csv}`\n")
-        handle.write(f"- Calibration plot index: `{calibration_index}`\n")
     else:
         handle.write("No runs were recorded.\n")
 
