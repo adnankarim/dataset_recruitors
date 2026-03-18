@@ -371,6 +371,7 @@ def save_prediction_frame(
     y_true: np.ndarray | None,
     y_true_labels: np.ndarray | None,
     sample_weight: np.ndarray | None,
+    effective_sample_weight: np.ndarray | None,
     y_prob: np.ndarray,
     class_names: list[str],
 ) -> None:
@@ -381,6 +382,8 @@ def save_prediction_frame(
         frame["label"] = y_true_labels
     if sample_weight is not None:
         frame["label_weight"] = sample_weight
+    if effective_sample_weight is not None:
+        frame["effective_sample_weight"] = effective_sample_weight
     predicted_indices = np.argmax(y_prob, axis=1).astype(np.int32)
     frame["predicted_label_id"] = predicted_indices
     frame["predicted_label"] = decode_label_indices(predicted_indices, class_names)
@@ -671,6 +674,8 @@ def training_summary(
         "created_at": utc_now(),
         "target_column": args.target_col,
         "weight_column": args.weight_col,
+        "training_weight_policy": "class-balanced loss weighting with optional label_weight",
+        "evaluation_weight_policy": "unweighted metrics and unweighted validation early stopping",
         "class_names": class_names,
         "num_classes": len(class_names),
         "num_boost_round": args.num_boost_round,
@@ -859,7 +864,7 @@ def main() -> None:
         encoded_frames["train"], encoded_labels_by_split["train"], sanitized_training_weights_by_split["train"], feature_names
     )
     dvalid = build_dmatrix(
-        encoded_frames["valid"], encoded_labels_by_split["valid"], sanitized_training_weights_by_split["valid"], feature_names
+        encoded_frames["valid"], encoded_labels_by_split["valid"], None, feature_names
     )
 
     train_params = build_train_params(args, len(class_names))
@@ -915,7 +920,8 @@ def main() -> None:
             metadata_by_split[split_name],
             y_true=y_true,
             y_true_labels=labels_by_split[split_name],
-            sample_weight=sanitized_training_weights_by_split[split_name],
+            sample_weight=weights_by_split[split_name],
+            effective_sample_weight=sanitized_training_weights_by_split[split_name] if split_name == "train" else None,
             y_prob=y_prob,
             class_names=class_names,
         )
@@ -923,7 +929,7 @@ def main() -> None:
             metrics_by_split[split_name] = evaluate_split(
                 y_true,
                 y_prob,
-                sample_weight=sanitized_training_weights_by_split[split_name],
+                sample_weight=None,
                 class_names=class_names,
             )
             labeled_predictions[split_name] = (y_true, y_prob)

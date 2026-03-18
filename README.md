@@ -243,9 +243,16 @@ End-to-end flow:
    the trainer computes per-class weights from the train split as `total_rows / (num_classes * class_count)`.
 5. For each training row, the final training weight is:
    `class_weight(label) * label_weight` when `label_weight` exists, otherwise just `class_weight(label)`.
-6. Those combined sample weights are passed into XGBoost during training and evaluation.
+6. Those combined sample weights are passed into XGBoost for training loss weighting.
 7. The selected imbalance mode and computed class weights are written to:
    `artifacts/run_summary.json` and `artifacts/label_mapping.json`.
+
+For scientific evaluation:
+
+- class balancing affects the training loss
+- validation early stopping is unweighted
+- reported validation/test metrics are unweighted
+- this keeps held-out scores aligned with the real class distribution instead of the reweighted loss
 
 What this does:
 
