@@ -915,7 +915,7 @@ def main() -> None:
             metadata_by_split[split_name],
             y_true=y_true,
             y_true_labels=labels_by_split[split_name],
-            sample_weight=weights_by_split[split_name],
+            sample_weight=sanitized_training_weights_by_split[split_name],
             y_prob=y_prob,
             class_names=class_names,
         )
@@ -923,7 +923,7 @@ def main() -> None:
             metrics_by_split[split_name] = evaluate_split(
                 y_true,
                 y_prob,
-                sample_weight=weights_by_split[split_name],
+                sample_weight=sanitized_training_weights_by_split[split_name],
                 class_names=class_names,
             )
             labeled_predictions[split_name] = (y_true, y_prob)
