@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import re
 from datetime import datetime, timezone
@@ -635,6 +636,25 @@ def build_train_params(args: argparse.Namespace, num_classes: int) -> dict:
     return params
 
 
+def make_training_checkpoint_callback(checkpoint_dir: Path, checkpoint_interval: int):
+    callback_ctor = xgb.callback.TrainingCheckPoint
+    signature = inspect.signature(callback_ctor)
+    kwargs = {
+        "directory": str(checkpoint_dir),
+        "name": "model",
+        "as_pickle": False,
+    }
+    if "interval" in signature.parameters:
+        kwargs["interval"] = checkpoint_interval
+    elif "iterations" in signature.parameters:
+        kwargs["iterations"] = checkpoint_interval
+    else:
+        raise TypeError(
+            "Unsupported XGBoost TrainingCheckPoint signature. Expected either 'interval' or 'iterations'."
+        )
+    return callback_ctor(**kwargs)
+
+
 def training_summary(
     args: argparse.Namespace,
     feature_columns: list[str],
@@ -846,12 +866,7 @@ def main() -> None:
     evals_result: dict = {}
     if remaining_rounds > 0:
         callbacks = [
-            xgb.callback.TrainingCheckPoint(
-                directory=str(checkpoints_dir),
-                iterations=args.checkpoint_interval,
-                name="model",
-                as_pickle=False,
-            )
+            make_training_checkpoint_callback(checkpoints_dir, args.checkpoint_interval)
         ]
         if args.early_stopping_rounds > 0:
             callbacks.append(xgb.callback.EarlyStopping(rounds=args.early_stopping_rounds, save_best=True))
