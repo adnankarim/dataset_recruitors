@@ -115,6 +115,162 @@ Switch between model sizes:
 .\.venv\Scripts\python.exe run_pplx_embedding_pipeline.py --model-size 4b
 ```
 
+## Train XGBoost On Extracted Features
+
+The training entrypoint is:
+
+- `train_xgboost_on_pplx_features.py`
+
+It trains on:
+
+- `output/feature_splits/train_with_pplx_features.parquet`
+- `output/feature_splits/valid_with_pplx_features.parquet`
+- `output/feature_splits/test_with_pplx_features.parquet`
+
+Expected label columns:
+
+- target: `label`
+- optional sample weight: `label_weight`
+
+Detected target classes in this dataset:
+
+- `Go`
+- `Interesting`
+- `Not interesting`
+- `Out of scope`
+- `Why not`
+
+By default the trainer:
+
+- uses only the Perplexity cosine feature columns as model inputs
+- trains a multiclass XGBoost classifier on the `label` column
+- leaves class-imbalance handling off unless you enable it
+- checkpoints the model during training
+- can resume from the latest checkpoint
+- writes evaluation metrics, predictions, and plots
+
+Train from scratch:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py
+```
+
+Train on GPU:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --device cuda
+```
+
+Train with class-imbalance handling enabled:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling balanced-sample-weight
+```
+
+Train with class-imbalance handling explicitly off:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling off
+```
+
+Resume from the latest checkpoint:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --resume
+```
+
+Example with custom run directory and boosting rounds:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --run-dir training_runs\xgboost_exp_01 --num-boost-round 2000 --checkpoint-interval 100
+```
+
+### Training Outputs
+
+Inside the run directory, for example `training_runs/xgboost_pplx/`:
+
+- `artifacts/metrics.json`
+- `artifacts/metrics.csv`
+- `artifacts/feature_columns.json`
+- `artifacts/label_mapping.json`
+- `artifacts/preprocessing.json`
+- `artifacts/run_summary.json`
+- `predictions/train_predictions.parquet`
+- `predictions/valid_predictions.parquet`
+- `predictions/test_predictions.parquet`
+- `models/xgboost_model_final.json`
+- `checkpoints/model_round_*.json`
+- `checkpoints/training_state.json`
+- `plots/learning_curves.png`
+- `plots/label_distribution.png`
+- `plots/roc_curves.png`
+- `plots/pr_curves.png`
+- `plots/calibration_curves.png`
+- `plots/prediction_histograms.png`
+- `plots/confusion_matrix_valid.png`
+- `plots/confusion_matrix_test.png`
+- `plots/feature_importance.csv`
+- `plots/feature_importance_gain_topk.png`
+- `plots/feature_importance_weight_topk.png`
+
+### Default Modeling Choices
+
+- objective: multiclass classification with `label`
+- input features: only `pplx_qc_*`, `pplx_uc_*`, `pplx_qu_*`, and `pplx_quc_*`
+- class imbalance handling: `off` by default, optional `balanced-sample-weight`
+- evaluation split for model selection: `valid`
+- predictions: class probabilities plus top predicted label
+- early stopping: enabled
+- checkpoints: saved every fixed number of boosting rounds
+
+### Class Imbalance Handling
+
+The trainer handles class imbalance at the label level for the 5-class target:
+
+- `Go`: `44388`
+- `Interesting`: `12058`
+- `Not interesting`: `18758`
+- `Out of scope`: `18198`
+- `Why not`: `18568`
+
+End-to-end flow:
+
+1. Read `label` from the train split and discover all classes.
+2. Build a stable label mapping written to `artifacts/label_mapping.json`.
+3. If `--class-imbalance-handling off` is used:
+   the trainer uses only the original `label_weight` values if that column exists.
+4. If `--class-imbalance-handling balanced-sample-weight` is used:
+   the trainer computes per-class weights from the train split as `total_rows / (num_classes * class_count)`.
+5. For each training row, the final training weight is:
+   `class_weight(label) * label_weight` when `label_weight` exists, otherwise just `class_weight(label)`.
+6. Those combined sample weights are passed into XGBoost during training and evaluation.
+7. The selected imbalance mode and computed class weights are written to:
+   `artifacts/run_summary.json` and `artifacts/label_mapping.json`.
+
+What this does:
+
+- gives more influence to underrepresented classes such as `Interesting`
+- gives less influence to the largest class such as `Go`
+- works for multiclass training, unlike binary-only `scale_pos_weight`
+
+What it does not do:
+
+- it does not resample rows
+- it does not change labels
+- it does not rebalance the validation or test files on disk
+
+Recommended usage:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling balanced-sample-weight
+```
+
+Disable it explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling off
+```
+
 ## Defaults
 
 - backend: `hf-local`

@@ -6,3 +6,6 @@ huggingface_hub
 transformers
 accelerate
 safetensors
+xgboost>=2.0.0
+scikit-learn
+matplotlib
