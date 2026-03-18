@@ -41,6 +41,7 @@ DEFAULT_DROP_COLUMNS = (
     "reason_codes,split"
 )
 DEFAULT_METADATA_COLUMNS = "event_id,user_id,search_id,profil_id,split"
+MIN_SAMPLE_WEIGHT = 1e-6
 
 
 def utc_now() -> str:
@@ -205,7 +206,7 @@ def one_hot_encode_splits(frames: dict[str, pd.DataFrame]) -> tuple[dict[str, pd
         if (
             pd.api.types.is_object_dtype(combined[column])
             or pd.api.types.is_string_dtype(combined[column])
-            or pd.api.types.is_categorical_dtype(combined[column])
+            or isinstance(combined[column].dtype, pd.CategoricalDtype)
             or pd.api.types.is_bool_dtype(combined[column])
         ):
             categorical_columns.append(column)
@@ -275,6 +276,35 @@ def combine_sample_weights(
     if base_weights is not None:
         combined = base_weights.astype(np.float32) if combined is None else combined * base_weights.astype(np.float32)
     return combined
+
+
+def sanitize_positive_weights(
+    weights: np.ndarray | None,
+    min_value: float = MIN_SAMPLE_WEIGHT,
+) -> tuple[np.ndarray | None, dict]:
+    if weights is None:
+        return None, {
+            "available": False,
+            "count": 0,
+            "replaced_non_finite": 0,
+            "replaced_non_positive": 0,
+            "min_applied_weight": min_value,
+        }
+
+    sanitized = np.asarray(weights, dtype=np.float32).copy()
+    non_finite_mask = ~np.isfinite(sanitized)
+    non_positive_mask = sanitized <= 0
+    replace_mask = non_finite_mask | non_positive_mask
+    if np.any(replace_mask):
+        sanitized[replace_mask] = min_value
+    stats = {
+        "available": True,
+        "count": int(len(sanitized)),
+        "replaced_non_finite": int(np.sum(non_finite_mask)),
+        "replaced_non_positive": int(np.sum(non_positive_mask & ~non_finite_mask)),
+        "min_applied_weight": min_value,
+    }
+    return sanitized, stats
 
 
 def safe_metric(fn, *args, **kwargs) -> float | None:
@@ -615,6 +645,7 @@ def training_summary(
     importance_path: Path,
     class_names: list[str],
     class_weight_map: dict[str, float] | None,
+    weight_sanitization: dict[str, dict],
 ) -> dict:
     return {
         "created_at": utc_now(),
@@ -627,6 +658,7 @@ def training_summary(
         "checkpoint_interval": args.checkpoint_interval,
         "class_imbalance_handling": args.class_imbalance_handling,
         "class_weight_map": class_weight_map,
+        "weight_sanitization": weight_sanitization,
         "selected_feature_columns": parse_csv_list(args.feature_cols),
         "drop_columns": parse_csv_list(args.drop_cols),
         "time_column": args.time_col,
@@ -755,6 +787,10 @@ def main() -> None:
         split_name: combine_sample_weights(weights_by_split[split_name], encoded_labels_by_split[split_name], class_weight_vector)
         for split_name in raw_frames
     }
+    sanitized_training_weights_by_split: dict[str, np.ndarray | None] = {}
+    weight_sanitization: dict[str, dict] = {}
+    for split_name, weights in training_weights_by_split.items():
+        sanitized_training_weights_by_split[split_name], weight_sanitization[split_name] = sanitize_positive_weights(weights)
 
     encoded_frames, feature_columns, categorical_columns = one_hot_encode_splits(feature_frames)
     write_json(artifacts_dir / "feature_columns.json", {"feature_columns": feature_columns})
@@ -777,6 +813,7 @@ def main() -> None:
             "time_column": args.time_col,
             "feature_count": len(feature_columns),
             "class_names": class_names,
+            "weight_sanitization": weight_sanitization,
         },
     )
     previous_history = None
@@ -799,10 +836,10 @@ def main() -> None:
 
     feature_names = encoded_frames["train"].columns.tolist()
     dtrain = build_dmatrix(
-        encoded_frames["train"], encoded_labels_by_split["train"], training_weights_by_split["train"], feature_names
+        encoded_frames["train"], encoded_labels_by_split["train"], sanitized_training_weights_by_split["train"], feature_names
     )
     dvalid = build_dmatrix(
-        encoded_frames["valid"], encoded_labels_by_split["valid"], training_weights_by_split["valid"], feature_names
+        encoded_frames["valid"], encoded_labels_by_split["valid"], sanitized_training_weights_by_split["valid"], feature_names
     )
 
     train_params = build_train_params(args, len(class_names))
@@ -929,6 +966,7 @@ def main() -> None:
         importance_path=plots_dir / "feature_importance.csv",
         class_names=class_names,
         class_weight_map=class_weight_map,
+        weight_sanitization=weight_sanitization,
     )
     write_json(artifacts_dir / "run_summary.json", summary)
     print(json.dumps(summary, indent=2))
