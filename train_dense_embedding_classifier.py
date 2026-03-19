@@ -901,7 +901,14 @@ def save_feature_importance(
         method = "mean_abs_logit_weight"
     elif model_type == "role-transformer":
         projection_weights = model.input_proj.weight.detach().cpu().numpy()
-        importance = np.abs(projection_weights).mean(axis=0)
+        role_importance = np.abs(projection_weights).mean(axis=0)
+        if len(feature_names) % len(role_importance) != 0:
+            raise ValueError(
+                "Role-transformer feature importance could not be aligned to feature columns: "
+                f"{len(feature_names)} columns vs {len(role_importance)} role dimensions."
+            )
+        repeat_factor = len(feature_names) // len(role_importance)
+        importance = np.tile(role_importance, repeat_factor)
         method = "mean_abs_role_projection_weight"
     else:
         first_layer_weights = model.input_layer.weight.detach().cpu().numpy()
