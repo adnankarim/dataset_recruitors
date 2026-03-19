@@ -115,11 +115,11 @@ Switch between model sizes:
 .\.venv\Scripts\python.exe run_pplx_embedding_pipeline.py --model-size 4b
 ```
 
-## Train XGBoost On Extracted Features
+## Train Dense Models On Raw Embeddings
 
 The training entrypoint is:
 
-- `train_xgboost_on_pplx_features.py`
+- `train_dense_embedding_classifier.py`
 
 It trains on:
 
@@ -144,69 +144,70 @@ By default the trainer:
 
 - uses only raw query, user, and candidate embeddings as model inputs
 - concatenates query, user, and candidate embedding prefixes into one feature vector
-- trains a multiclass XGBoost classifier on the `label` column
+- zeroes the user embedding prefix for cold-start rows
+- trains either a multinomial logistic regression head or an MLP on the `label` column
 - leaves class-imbalance handling off unless you enable it
 - checkpoints the model during training
 - can resume from the latest checkpoint
 - writes evaluation metrics, predictions, and plots
 
-Train from scratch:
+Train logistic regression from scratch:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type logreg
 ```
 
-Train on GPU:
+Train MLP on GPU:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --device cuda
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --device cuda
 ```
 
 Train with class-imbalance handling enabled:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling balanced-sample-weight
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type logreg --class-imbalance-handling balanced-sample-weight
 ```
 
 Train with a smaller raw embedding prefix:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --embedding-prefix-dim 256
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --embedding-prefix-dim 256
 ```
 
 Train with class-imbalance handling explicitly off:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling off
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type logreg --class-imbalance-handling off
 ```
 
 Resume from the latest checkpoint:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --resume
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --resume
 ```
 
-Example with custom run directory and boosting rounds:
+Example with custom run directory, batch size, and epochs:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --run-dir training_runs\xgboost_exp_01 --num-boost-round 2000 --checkpoint-interval 100
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --run-dir training_runs\dense_exp_01 --batch-size 4096 --max-epochs 60 --checkpoint-interval 5
 ```
 
-Run raw embedding ablations across prefix dimensions:
+Run dense-model ablations across model families and prefix dimensions:
 
 ```bash
 bash run_xgboost_ablation.sh
 ```
 
-Custom ablation dimensions:
+Custom model families and ablation dimensions:
 
 ```bash
-bash run_xgboost_ablation.sh --dims 128,256,512,1024
+bash run_xgboost_ablation.sh --model-types logreg,mlp --dims 256,512,1024
 ```
 
 ### Training Outputs
 
-Inside the run directory, for example `training_runs/xgboost_pplx/`:
+Inside the run directory, for example `training_runs/dense_embedding_classifier/`:
 
 - `artifacts/metrics.json`
 - `artifacts/metrics.csv`
@@ -217,8 +218,9 @@ Inside the run directory, for example `training_runs/xgboost_pplx/`:
 - `predictions/train_predictions.parquet`
 - `predictions/valid_predictions.parquet`
 - `predictions/test_predictions.parquet`
-- `models/xgboost_model_final.json`
-- `checkpoints/model_round_*.json`
+- `models/model_best.pt`
+- `models/model_last.pt`
+- `checkpoints/epoch_*.pt`
 - `checkpoints/training_state.json`
 - `plots/learning_curves.png`
 - `plots/label_distribution.png`
@@ -229,20 +231,22 @@ Inside the run directory, for example `training_runs/xgboost_pplx/`:
 - `plots/confusion_matrix_valid.png`
 - `plots/confusion_matrix_test.png`
 - `plots/feature_importance.csv`
-- `plots/feature_importance_gain_topk.png`
-- `plots/feature_importance_weight_topk.png`
+- `plots/feature_importance_topk.png`
 
 ### Default Modeling Choices
 
 - objective: multiclass classification with `label`
 - feature source: raw embeddings from `output/store/*.npy`
 - input features: concatenated `query`, `user`, and `candidate` embedding prefixes
+- cold-start handling: zero user embedding prefix when no user embedding is available
 - default embedding prefix dim: `1024`
+- default model family: `logreg`
+- alternative model family: `mlp`
 - class imbalance handling: `off` by default, optional `balanced-sample-weight`
 - evaluation split for model selection: `valid`
 - predictions: class probabilities plus top predicted label
 - early stopping: enabled
-- checkpoints: saved every fixed number of boosting rounds
+- checkpoints: saved every fixed number of epochs
 
 ### Class Imbalance Handling
 
@@ -264,7 +268,7 @@ End-to-end flow:
    the trainer computes per-class weights from the train split as `total_rows / (num_classes * class_count)`.
 5. For each training row, the final training weight is:
    `class_weight(label) * label_weight` when `label_weight` exists, otherwise just `class_weight(label)`.
-6. Those combined sample weights are passed into XGBoost for training loss weighting.
+6. Those combined sample weights are passed into the dense classifier training loss.
 7. The selected imbalance mode and computed class weights are written to:
    `artifacts/run_summary.json` and `artifacts/label_mapping.json`.
 
@@ -290,13 +294,13 @@ What it does not do:
 Recommended usage:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling balanced-sample-weight
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type logreg --class-imbalance-handling balanced-sample-weight
 ```
 
 Disable it explicitly:
 
 ```powershell
-.\.venv\Scripts\python.exe train_xgboost_on_pplx_features.py --class-imbalance-handling off
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type logreg --class-imbalance-handling off
 ```
 
 ## Defaults

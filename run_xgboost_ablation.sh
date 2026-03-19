@@ -13,20 +13,26 @@ RUNS_DIR="$ABLATION_DIR/runs"
 LOGS_DIR="$ABLATION_DIR/logs"
 REPORTS_DIR="$ABLATION_DIR/reports"
 CALIBRATION_DIR="$ABLATION_DIR/calibration_plots"
-DEVICE="${DEVICE:-cpu}"
-NUM_BOOST_ROUND="${NUM_BOOST_ROUND:-1200}"
-EARLY_STOPPING_ROUNDS="${EARLY_STOPPING_ROUNDS:-100}"
-CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-50}"
+DEVICE="${DEVICE:-auto}"
+MAX_EPOCHS="${MAX_EPOCHS:-40}"
+EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-6}"
+CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-2}"
+BATCH_SIZE="${BATCH_SIZE:-2048}"
 SEED="${SEED:-42}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
+HIDDEN_DIMS="${HIDDEN_DIMS:-1024,512}"
+DROPOUT="${DROPOUT:-0.1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+MODEL_TYPES="logreg,mlp"
 DIMS="256,512,1024"
 IMBALANCE_MODES="off,balanced-sample-weight"
 
 usage() {
   cat <<EOF
-Usage: bash run_xgboost_ablation.sh [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight]
+Usage: bash run_xgboost_ablation.sh [--model-types logreg,mlp] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight]
 
 Options:
+  --model-types        Comma-separated dense model families to evaluate. Default: logreg,mlp
   --dims               Comma-separated embedding prefix dimensions to evaluate. Default: 256,512,1024
   --imbalance-modes    Comma-separated imbalance modes. Default: off,balanced-sample-weight
 EOF
@@ -34,6 +40,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --model-types)
+      MODEL_TYPES="$2"
+      shift 2
+      ;;
     --dims)
       DIMS="$2"
       shift 2
@@ -54,6 +64,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+IFS=',' read -r -a MODEL_VALUES <<<"$MODEL_TYPES"
 IFS=',' read -r -a DIM_VALUES <<<"$DIMS"
 IFS=',' read -r -a IMBALANCE_VALUES <<<"$IMBALANCE_MODES"
 
@@ -65,22 +76,24 @@ SUMMARY_MD="$REPORTS_DIR/ablation_summary.md"
 CALIBRATION_INDEX="$REPORTS_DIR/calibration_index.md"
 
 cat >"$MANIFEST_PATH" <<EOF
-experiment_name	class_imbalance_handling	embedding_prefix_dim	run_dir	log_path	status
+experiment_name	model_type	class_imbalance_handling	embedding_prefix_dim	run_dir	log_path	status
 EOF
 
 echo "Ablation root: $ABLATION_DIR"
 echo "Using feature dir: $FEATURE_DIR"
 echo "Using store dir:   $STORE_DIR"
-echo "Using python: $PYTHON_BIN"
-echo "Embedding dims: $DIMS"
-echo "Imbalance modes: $IMBALANCE_MODES"
+echo "Using python:      $PYTHON_BIN"
+echo "Model types:       $MODEL_TYPES"
+echo "Embedding dims:    $DIMS"
+echo "Imbalance modes:   $IMBALANCE_MODES"
 
 failures=()
 
 run_experiment() {
   local name="$1"
-  local imbalance="$2"
-  local prefix_dim="$3"
+  local model_type="$2"
+  local imbalance="$3"
+  local prefix_dim="$4"
   local run_dir="$RUNS_DIR/$name"
   local log_path="$LOGS_DIR/$name.log"
   local calibration_target="$CALIBRATION_DIR/${name}_calibration.png"
@@ -91,21 +104,27 @@ run_experiment() {
   echo
   echo "============================================================"
   echo "Running experiment: $name"
+  echo "Model type:        $model_type"
   echo "Class imbalance:   $imbalance"
   echo "Embedding dim:     $prefix_dim"
   echo "Run dir:           $run_dir"
   echo "============================================================"
 
-  if "$PYTHON_BIN" "$ROOT_DIR/train_xgboost_on_pplx_features.py" \
+  if "$PYTHON_BIN" "$ROOT_DIR/train_dense_embedding_classifier.py" \
     --feature-dir "$FEATURE_DIR" \
     --store-dir "$STORE_DIR" \
     --run-dir "$run_dir" \
+    --model-type "$model_type" \
     --embedding-prefix-dim "$prefix_dim" \
     --class-imbalance-handling "$imbalance" \
     --device "$DEVICE" \
-    --num-boost-round "$NUM_BOOST_ROUND" \
-    --early-stopping-rounds "$EARLY_STOPPING_ROUNDS" \
+    --batch-size "$BATCH_SIZE" \
+    --max-epochs "$MAX_EPOCHS" \
+    --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
     --checkpoint-interval "$CHECKPOINT_INTERVAL" \
+    --num-workers "$NUM_WORKERS" \
+    --hidden-dims "$HIDDEN_DIMS" \
+    --dropout "$DROPOUT" \
     --seed "$SEED" \
     ${EXTRA_ARGS} 2>&1 | tee "$log_path"; then
     if [[ -f "$run_dir/plots/calibration_curves.png" ]]; then
@@ -116,17 +135,21 @@ run_experiment() {
     failures+=("$name")
   fi
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "$name" "$imbalance" "$prefix_dim" "$run_dir" "$log_path" "$status" >>"$MANIFEST_PATH"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$name" "$model_type" "$imbalance" "$prefix_dim" "$run_dir" "$log_path" "$status" >>"$MANIFEST_PATH"
 }
 
-for dim in "${DIM_VALUES[@]}"; do
-  dim="$(echo "$dim" | xargs)"
-  [[ -n "$dim" ]] || continue
-  for imbalance in "${IMBALANCE_VALUES[@]}"; do
-    imbalance="$(echo "$imbalance" | xargs)"
-    [[ -n "$imbalance" ]] || continue
-    run_experiment "rawdim${dim}_${imbalance//-/_}" "$imbalance" "$dim"
+for model_type in "${MODEL_VALUES[@]}"; do
+  model_type="$(echo "$model_type" | xargs)"
+  [[ -n "$model_type" ]] || continue
+  for dim in "${DIM_VALUES[@]}"; do
+    dim="$(echo "$dim" | xargs)"
+    [[ -n "$dim" ]] || continue
+    for imbalance in "${IMBALANCE_VALUES[@]}"; do
+      imbalance="$(echo "$imbalance" | xargs)"
+      [[ -n "$imbalance" ]] || continue
+      run_experiment "${model_type}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim"
+    done
   done
 done
 
@@ -156,6 +179,7 @@ for row in rows:
     record = {
         "experiment_name": row["experiment_name"],
         "status": row["status"],
+        "model_type": row["model_type"],
         "class_imbalance_handling": row["class_imbalance_handling"],
         "embedding_prefix_dim": row["embedding_prefix_dim"],
         "run_dir": row["run_dir"],
@@ -173,6 +197,8 @@ for row in rows:
         run_summary = json.loads(summary_path.read_text(encoding="utf-8"))
         record["feature_count"] = run_summary.get("feature_count")
         record["class_names"] = ",".join(run_summary.get("class_names", []))
+        record["hidden_dims"] = ",".join(str(value) for value in run_summary.get("hidden_dims", []))
+        record["best_epoch"] = run_summary.get("best_epoch")
 
     summary_rows.append(record)
 
@@ -188,9 +214,12 @@ summary_rows.sort(
 fieldnames = [
     "experiment_name",
     "status",
+    "model_type",
     "embedding_prefix_dim",
     "class_imbalance_handling",
+    "hidden_dims",
     "feature_count",
+    "best_epoch",
     "valid_f1_macro",
     "valid_balanced_accuracy",
     "valid_accuracy",
@@ -212,24 +241,27 @@ with summary_csv.open("w", encoding="utf-8", newline="") as handle:
         writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 with summary_md.open("w", encoding="utf-8") as handle:
-    handle.write("# Raw Embedding XGBoost Ablation Summary\n\n")
+    handle.write("# Raw Embedding Dense Model Ablation Summary\n\n")
     if summary_rows:
         best = summary_rows[0]
         handle.write("## Best Validation Run\n\n")
         handle.write(f"- Experiment: `{best['experiment_name']}`\n")
+        handle.write(f"- Model type: `{best['model_type']}`\n")
         handle.write(f"- Embedding prefix dim: `{best['embedding_prefix_dim']}`\n")
         handle.write(f"- Class imbalance handling: `{best['class_imbalance_handling']}`\n")
+        handle.write(f"- Hidden dims: `{best.get('hidden_dims', '')}`\n")
         handle.write(f"- Validation macro F1: `{best.get('valid_f1_macro', '')}`\n")
         handle.write(f"- Validation balanced accuracy: `{best.get('valid_balanced_accuracy', '')}`\n")
         handle.write(f"- Test macro F1: `{best.get('test_f1_macro', '')}`\n")
         handle.write(f"- Run directory: `{best['run_dir']}`\n\n")
-        handle.write("| Experiment | Dim | Imbalance | Valid F1 Macro | Valid Balanced Acc | Test F1 Macro | Test Balanced Acc |\n")
-        handle.write("| --- | ---: | --- | ---: | ---: | ---: | ---: |\n")
+        handle.write("| Experiment | Model | Dim | Imbalance | Valid F1 Macro | Valid Balanced Acc | Test F1 Macro | Test Balanced Acc |\n")
+        handle.write("| --- | --- | ---: | --- | ---: | ---: | ---: | ---: |\n")
         for row in summary_rows:
             handle.write(
-                f"| {row['experiment_name']} | {row['embedding_prefix_dim']} | {row['class_imbalance_handling']} "
-                f"| {row.get('valid_f1_macro', '')} | {row.get('valid_balanced_accuracy', '')} "
-                f"| {row.get('test_f1_macro', '')} | {row.get('test_balanced_accuracy', '')} |\n"
+                f"| {row['experiment_name']} | {row['model_type']} | {row['embedding_prefix_dim']} "
+                f"| {row['class_imbalance_handling']} | {row.get('valid_f1_macro', '')} "
+                f"| {row.get('valid_balanced_accuracy', '')} | {row.get('test_f1_macro', '')} "
+                f"| {row.get('test_balanced_accuracy', '')} |\n"
             )
     else:
         handle.write("No runs were recorded.\n")
