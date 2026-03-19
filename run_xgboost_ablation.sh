@@ -28,15 +28,17 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 MODEL_TYPES="logreg,role-transformer"
 DIMS="256,512,1024"
 IMBALANCE_MODES="off,balanced-sample-weight"
+LABEL_MODE="${LABEL_MODE:-original}"
 
 usage() {
   cat <<EOF
-Usage: bash run_xgboost_ablation.sh [--model-types logreg,role-transformer] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight] [--transformer-configs 512,8,2,4,0.1;768,8,3,4,0.1]
+Usage: bash run_xgboost_ablation.sh [--model-types logreg,role-transformer] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight] [--label-mode original|merged3] [--transformer-configs 512,8,2,4,0.1;768,8,3,4,0.1]
 
 Options:
   --model-types        Comma-separated dense model families to evaluate. Default: logreg,role-transformer
   --dims               Comma-separated embedding prefix dimensions to evaluate. Default: 256,512,1024
   --imbalance-modes    Comma-separated imbalance modes. Default: off,balanced-sample-weight
+  --label-mode         Label target mode. Use original 5 classes or merged3.
   --mlp-configs        Semicolon-separated hidden-dim/dropout specs for mlp. Format: hidden1,hidden2@dropout
   --transformer-configs Semicolon-separated transformer specs. Format: d_model,num_heads,num_layers,ff_mult,dropout
 EOF
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --imbalance-modes)
       IMBALANCE_MODES="$2"
+      shift 2
+      ;;
+    --label-mode)
+      LABEL_MODE="$2"
       shift 2
       ;;
     --mlp-configs)
@@ -98,6 +104,7 @@ echo "Using python:      $PYTHON_BIN"
 echo "Model types:       $MODEL_TYPES"
 echo "Embedding dims:    $DIMS"
 echo "Imbalance modes:   $IMBALANCE_MODES"
+echo "Label mode:        $LABEL_MODE"
 echo "MLP configs:       $MLP_CONFIGS"
 echo "Transformer cfgs:  $TRANSFORMER_CONFIGS"
 
@@ -146,6 +153,7 @@ run_experiment() {
     --store-dir "$STORE_DIR"
     --run-dir "$run_dir"
     --model-type "$model_type"
+    --label-mode "$LABEL_MODE"
     --embedding-prefix-dim "$prefix_dim"
     --class-imbalance-handling "$imbalance"
     --device "$DEVICE"

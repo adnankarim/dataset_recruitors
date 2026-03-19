@@ -49,9 +49,17 @@ DEFAULT_STORE_DIR = str(BASE_DIR / "output" / "store")
 DEFAULT_RUN_DIR = str(BASE_DIR / "training_runs" / "dense_embedding_classifier")
 DEFAULT_METADATA_COLUMNS = "event_id,user_id,search_id,profil_id,split"
 DEFAULT_LABEL_ORDER = "Go,Interesting,Why not,Not interesting,Out of scope"
+DEFAULT_MERGED_LABEL_ORDER = "Go,Interesting / Why not,Not interesting / Out of scope"
 MIN_SAMPLE_WEIGHT = 1e-6
 INT8_SCALE = 127.0
 EMBEDDING_ID_COLUMNS = ("query_text_id", "user_text_id", "candidate_text_id")
+MERGED_THREE_LABEL_MAP = {
+    "Go": "Go",
+    "Interesting": "Interesting / Why not",
+    "Why not": "Interesting / Why not",
+    "Not interesting": "Not interesting / Out of scope",
+    "Out of scope": "Not interesting / Out of scope",
+}
 
 
 def utc_now() -> str:
@@ -200,6 +208,20 @@ def split_labels_and_metadata(
     return labels, weights, metadata
 
 
+def merge_labels(y: np.ndarray | None, label_mode: str) -> np.ndarray | None:
+    if y is None:
+        return None
+    series = pd.Series(y).astype(str)
+    if label_mode == "original":
+        return series.to_numpy(dtype=object)
+    if label_mode != "merged3":
+        raise ValueError(f"Unsupported label mode: {label_mode}")
+    unknown = sorted(set(series.unique()) - set(MERGED_THREE_LABEL_MAP))
+    if unknown:
+        raise ValueError(f"Cannot apply merged3 label mode because these labels are unmapped: {unknown}")
+    return series.map(MERGED_THREE_LABEL_MAP).to_numpy(dtype=object)
+
+
 def infer_label_classes(y: np.ndarray, preferred_order: list[str] | None = None) -> list[str]:
     values = pd.Series(y).dropna().astype(str)
     unique_values = values.unique().tolist()
@@ -345,6 +367,7 @@ def save_prediction_frame(
     metadata: pd.DataFrame,
     y_true: np.ndarray | None,
     y_true_labels: np.ndarray | None,
+    original_y_true_labels: np.ndarray | None,
     sample_weight: np.ndarray | None,
     effective_sample_weight: np.ndarray | None,
     y_prob: np.ndarray,
@@ -355,6 +378,8 @@ def save_prediction_frame(
         frame["label_id"] = y_true
     if y_true_labels is not None:
         frame["label"] = y_true_labels
+    if original_y_true_labels is not None:
+        frame["original_label"] = original_y_true_labels
     if sample_weight is not None:
         frame["label_weight"] = sample_weight
     if effective_sample_weight is not None:
@@ -949,6 +974,7 @@ def training_summary(
     resolved_learning_rate: float,
     device_name: str,
     coldstart_zeroed_rows: dict[str, int],
+    label_order: list[str],
 ) -> dict:
     return {
         "created_at": utc_now(),
@@ -958,7 +984,9 @@ def training_summary(
         "evaluation_weight_policy": "unweighted metrics and unweighted validation early stopping",
         "feature_source": "raw query/user/candidate embedding prefixes",
         "store_dir": str(Path(args.store_dir).resolve()),
-        "label_order": parse_csv_list(args.label_order),
+        "label_mode": args.label_mode,
+        "merged_three_label_map": MERGED_THREE_LABEL_MAP if args.label_mode == "merged3" else None,
+        "label_order": label_order,
         "label_order_policy": "explicit preferred order with sorted fallback for unseen labels",
         "model_type": args.model_type,
         "embedding_prefix_dim": args.embedding_prefix_dim,
@@ -1004,6 +1032,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-col", default="label")
     parser.add_argument("--weight-col", default="label_weight")
     parser.add_argument("--metadata-cols", default=DEFAULT_METADATA_COLUMNS)
+    parser.add_argument("--label-mode", default="original", choices=["original", "merged3"])
+    parser.add_argument("--merged-training", action="store_true")
     parser.add_argument("--label-order", default=DEFAULT_LABEL_ORDER)
     parser.add_argument("--model-type", default="logreg", choices=["logreg", "mlp", "role-transformer"])
     parser.add_argument("--embedding-prefix-dim", type=positive_int, default=1024)
@@ -1047,6 +1077,8 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    if args.merged_training:
+        args.label_mode = "merged3"
     if args.model_type == "logreg":
         args.dropout = 0.0
 
@@ -1102,10 +1134,13 @@ def main() -> None:
         metadata_by_split[split_name] = metadata
         coldstart_zeroed_rows[split_name] = zeroed_count
 
+    original_labels_by_split = labels_by_split.copy()
+    labels_by_split = {split_name: merge_labels(labels, args.label_mode) for split_name, labels in labels_by_split.items()}
+
     if labels_by_split["train"] is None or labels_by_split["valid"] is None:
         raise ValueError("Train and valid splits must contain the target column.")
 
-    label_order = parse_csv_list(args.label_order)
+    label_order = parse_csv_list(DEFAULT_MERGED_LABEL_ORDER if args.label_mode == "merged3" else args.label_order)
     class_names = infer_label_classes(labels_by_split["train"], preferred_order=label_order)
     class_to_index = {label: index for index, label in enumerate(class_names)}
     encoded_labels_by_split = {
@@ -1137,6 +1172,8 @@ def main() -> None:
         {
             "class_names": class_names,
             "class_to_index": class_to_index,
+            "label_mode": args.label_mode,
+            "merged_three_label_map": MERGED_THREE_LABEL_MAP if args.label_mode == "merged3" else None,
             "label_order": label_order,
             "label_order_policy": "explicit preferred order with sorted fallback for unseen labels",
             "class_weight_map": class_weight_map,
@@ -1150,6 +1187,8 @@ def main() -> None:
             "feature_source": "raw query/user/candidate embedding prefixes",
             "embedding_prefix_dim": args.embedding_prefix_dim,
             "feature_count": len(feature_columns),
+            "label_mode": args.label_mode,
+            "merged_three_label_map": MERGED_THREE_LABEL_MAP if args.label_mode == "merged3" else None,
             "label_order": label_order,
             "input_scaling": "int8 embeddings divided by 127.0",
             "coldstart_user_embedding_policy": "user embedding prefix is zeroed when embedding_user_available == 0 or is_coldstart == 1",
@@ -1322,6 +1361,7 @@ def main() -> None:
             metadata_by_split[split_name],
             y_true=y_true,
             y_true_labels=labels_by_split[split_name],
+            original_y_true_labels=original_labels_by_split[split_name],
             sample_weight=weights_by_split[split_name],
             effective_sample_weight=sanitized_training_weights_by_split[split_name] if split_name == "train" else None,
             y_prob=y_prob,
@@ -1380,6 +1420,7 @@ def main() -> None:
         resolved_learning_rate=learning_rate,
         device_name=str(device),
         coldstart_zeroed_rows=coldstart_zeroed_rows,
+        label_order=label_order,
     )
     write_json(artifacts_dir / "run_summary.json", summary)
     print(json.dumps(summary, indent=2))

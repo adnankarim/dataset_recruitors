@@ -177,6 +177,12 @@ Train with class-imbalance handling enabled:
 .\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type logreg --class-imbalance-handling balanced-sample-weight
 ```
 
+Train with merged 3-class targets:
+
+```powershell
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type role-transformer --label-mode merged3
+```
+
 Train with a smaller raw embedding prefix:
 
 ```powershell
@@ -211,6 +217,12 @@ Custom model families and ablation dimensions:
 
 ```bash
 bash run_xgboost_ablation.sh --model-types logreg,role-transformer --dims 256,512,1024
+```
+
+Run the same ablation in merged 3-class mode:
+
+```bash
+bash run_xgboost_ablation.sh --model-types logreg,role-transformer --label-mode merged3
 ```
 
 Run a wider transformer architecture sweep:
@@ -257,6 +269,10 @@ Inside the run directory, for example `training_runs/dense_embedding_classifier/
 - default model family: `logreg`
 - alternative model family: `role-transformer`
 - default label order: `Go -> Interesting -> Why not -> Not interesting -> Out of scope`
+- optional merged 3-class mode:
+  `Go`
+  `Interesting / Why not`
+  `Not interesting / Out of scope`
 - transformer ablations can sweep multiple depth/width/head/dropout configurations
 - class imbalance handling: `off` by default, optional `balanced-sample-weight`
 - evaluation split for model selection: `valid`
