@@ -32,13 +32,13 @@ LABEL_MODE="${LABEL_MODE:-original}"
 
 usage() {
   cat <<EOF
-Usage: bash run_xgboost_ablation.sh [--model-types logreg,role-transformer] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight] [--label-mode original|merged3] [--transformer-configs 512,8,2,4,0.1;768,8,3,4,0.1]
+Usage: bash run_xgboost_ablation.sh [--model-types logreg,role-transformer] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight] [--label-mode original|merged3|merged2] [--transformer-configs 512,8,2,4,0.1;768,8,3,4,0.1]
 
 Options:
   --model-types        Comma-separated dense model families to evaluate. Default: logreg,role-transformer
   --dims               Comma-separated embedding prefix dimensions to evaluate. Default: 256,512,1024
   --imbalance-modes    Comma-separated imbalance modes. Default: off,balanced-sample-weight
-  --label-mode         Label target mode. Use original 5 classes or merged3.
+  --label-mode         Label target mode. Use original 5 classes, merged3, or merged2.
   --mlp-configs        Semicolon-separated hidden-dim/dropout specs for mlp. Format: hidden1,hidden2@dropout
   --transformer-configs Semicolon-separated transformer specs. Format: d_model,num_heads,num_layers,ff_mult,dropout
 EOF

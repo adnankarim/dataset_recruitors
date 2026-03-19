@@ -183,6 +183,12 @@ Train with merged 3-class targets:
 .\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type role-transformer --label-mode merged3
 ```
 
+Train with merged 2-class targets:
+
+```powershell
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type role-transformer --label-mode merged2
+```
+
 Train with a smaller raw embedding prefix:
 
 ```powershell
@@ -223,6 +229,12 @@ Run the same ablation in merged 3-class mode:
 
 ```bash
 bash run_xgboost_ablation.sh --model-types logreg,role-transformer --label-mode merged3
+```
+
+Run the same ablation in merged 2-class mode:
+
+```bash
+bash run_xgboost_ablation.sh --model-types logreg,role-transformer --label-mode merged2
 ```
 
 Run a wider transformer architecture sweep:
@@ -273,6 +285,9 @@ Inside the run directory, for example `training_runs/dense_embedding_classifier/
   `Go`
   `Interesting / Why not`
   `Not interesting / Out of scope`
+- optional merged 2-class mode:
+  `Go / Interesting`
+  `Why not / Not interesting / Out of scope`
 - transformer ablations can sweep multiple depth/width/head/dropout configurations
 - class imbalance handling: `off` by default, optional `balanced-sample-weight`
 - evaluation split for model selection: `valid`

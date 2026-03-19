@@ -50,6 +50,7 @@ DEFAULT_RUN_DIR = str(BASE_DIR / "training_runs" / "dense_embedding_classifier")
 DEFAULT_METADATA_COLUMNS = "event_id,user_id,search_id,profil_id,split"
 DEFAULT_LABEL_ORDER = "Go,Interesting,Why not,Not interesting,Out of scope"
 DEFAULT_MERGED_LABEL_ORDER = "Go,Interesting / Why not,Not interesting / Out of scope"
+DEFAULT_BINARY_LABEL_ORDER = "Go / Interesting,Why not / Not interesting / Out of scope"
 MIN_SAMPLE_WEIGHT = 1e-6
 INT8_SCALE = 127.0
 EMBEDDING_ID_COLUMNS = ("query_text_id", "user_text_id", "candidate_text_id")
@@ -59,6 +60,13 @@ MERGED_THREE_LABEL_MAP = {
     "Why not": "Interesting / Why not",
     "Not interesting": "Not interesting / Out of scope",
     "Out of scope": "Not interesting / Out of scope",
+}
+MERGED_TWO_LABEL_MAP = {
+    "Go": "Go / Interesting",
+    "Interesting": "Go / Interesting",
+    "Why not": "Why not / Not interesting / Out of scope",
+    "Not interesting": "Why not / Not interesting / Out of scope",
+    "Out of scope": "Why not / Not interesting / Out of scope",
 }
 
 
@@ -214,12 +222,16 @@ def merge_labels(y: np.ndarray | None, label_mode: str) -> np.ndarray | None:
     series = pd.Series(y).astype(str)
     if label_mode == "original":
         return series.to_numpy(dtype=object)
-    if label_mode != "merged3":
+    if label_mode == "merged3":
+        label_map = MERGED_THREE_LABEL_MAP
+    elif label_mode == "merged2":
+        label_map = MERGED_TWO_LABEL_MAP
+    else:
         raise ValueError(f"Unsupported label mode: {label_mode}")
-    unknown = sorted(set(series.unique()) - set(MERGED_THREE_LABEL_MAP))
+    unknown = sorted(set(series.unique()) - set(label_map))
     if unknown:
-        raise ValueError(f"Cannot apply merged3 label mode because these labels are unmapped: {unknown}")
-    return series.map(MERGED_THREE_LABEL_MAP).to_numpy(dtype=object)
+        raise ValueError(f"Cannot apply {label_mode} label mode because these labels are unmapped: {unknown}")
+    return series.map(label_map).to_numpy(dtype=object)
 
 
 def infer_label_classes(y: np.ndarray, preferred_order: list[str] | None = None) -> list[str]:
@@ -976,6 +988,11 @@ def training_summary(
     coldstart_zeroed_rows: dict[str, int],
     label_order: list[str],
 ) -> dict:
+    merged_label_map = None
+    if args.label_mode == "merged3":
+        merged_label_map = MERGED_THREE_LABEL_MAP
+    elif args.label_mode == "merged2":
+        merged_label_map = MERGED_TWO_LABEL_MAP
     return {
         "created_at": utc_now(),
         "target_column": args.target_col,
@@ -985,7 +1002,7 @@ def training_summary(
         "feature_source": "raw query/user/candidate embedding prefixes",
         "store_dir": str(Path(args.store_dir).resolve()),
         "label_mode": args.label_mode,
-        "merged_three_label_map": MERGED_THREE_LABEL_MAP if args.label_mode == "merged3" else None,
+        "merged_label_map": merged_label_map,
         "label_order": label_order,
         "label_order_policy": "explicit preferred order with sorted fallback for unseen labels",
         "model_type": args.model_type,
@@ -1032,7 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-col", default="label")
     parser.add_argument("--weight-col", default="label_weight")
     parser.add_argument("--metadata-cols", default=DEFAULT_METADATA_COLUMNS)
-    parser.add_argument("--label-mode", default="original", choices=["original", "merged3"])
+    parser.add_argument("--label-mode", default="original", choices=["original", "merged3", "merged2"])
     parser.add_argument("--merged-training", action="store_true")
     parser.add_argument("--label-order", default=DEFAULT_LABEL_ORDER)
     parser.add_argument("--model-type", default="logreg", choices=["logreg", "mlp", "role-transformer"])
@@ -1140,7 +1157,15 @@ def main() -> None:
     if labels_by_split["train"] is None or labels_by_split["valid"] is None:
         raise ValueError("Train and valid splits must contain the target column.")
 
-    label_order = parse_csv_list(DEFAULT_MERGED_LABEL_ORDER if args.label_mode == "merged3" else args.label_order)
+    if args.label_mode == "merged3":
+        label_order = parse_csv_list(DEFAULT_MERGED_LABEL_ORDER)
+        merged_label_map = MERGED_THREE_LABEL_MAP
+    elif args.label_mode == "merged2":
+        label_order = parse_csv_list(DEFAULT_BINARY_LABEL_ORDER)
+        merged_label_map = MERGED_TWO_LABEL_MAP
+    else:
+        label_order = parse_csv_list(args.label_order)
+        merged_label_map = None
     class_names = infer_label_classes(labels_by_split["train"], preferred_order=label_order)
     class_to_index = {label: index for index, label in enumerate(class_names)}
     encoded_labels_by_split = {
@@ -1173,7 +1198,7 @@ def main() -> None:
             "class_names": class_names,
             "class_to_index": class_to_index,
             "label_mode": args.label_mode,
-            "merged_three_label_map": MERGED_THREE_LABEL_MAP if args.label_mode == "merged3" else None,
+            "merged_label_map": merged_label_map,
             "label_order": label_order,
             "label_order_policy": "explicit preferred order with sorted fallback for unseen labels",
             "class_weight_map": class_weight_map,
@@ -1188,7 +1213,7 @@ def main() -> None:
             "embedding_prefix_dim": args.embedding_prefix_dim,
             "feature_count": len(feature_columns),
             "label_mode": args.label_mode,
-            "merged_three_label_map": MERGED_THREE_LABEL_MAP if args.label_mode == "merged3" else None,
+            "merged_label_map": merged_label_map,
             "label_order": label_order,
             "input_scaling": "int8 embeddings divided by 127.0",
             "coldstart_user_embedding_policy": "user embedding prefix is zeroed when embedding_user_available == 0 or is_coldstart == 1",
