@@ -153,7 +153,7 @@ By default the trainer:
 - uses only raw query, user, and candidate embeddings as model inputs
 - concatenates query, user, and candidate embedding prefixes into one feature vector
 - zeroes the user embedding prefix for cold-start rows
-- trains either a multinomial logistic regression head or an MLP on the `label` column
+- trains either a multinomial logistic regression head or a role-aware transformer classifier on the `label` column
 - leaves class-imbalance handling off unless you enable it
 - checkpoints the model during training
 - can resume from the latest checkpoint
@@ -165,10 +165,10 @@ Train logistic regression from scratch:
 .\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type logreg
 ```
 
-Train MLP on GPU:
+Train the role-aware transformer on GPU:
 
 ```powershell
-.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --device cuda
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type role-transformer --device cuda
 ```
 
 Train with class-imbalance handling enabled:
@@ -180,7 +180,7 @@ Train with class-imbalance handling enabled:
 Train with a smaller raw embedding prefix:
 
 ```powershell
-.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --embedding-prefix-dim 256
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type role-transformer --embedding-prefix-dim 256
 ```
 
 Train with class-imbalance handling explicitly off:
@@ -192,13 +192,13 @@ Train with class-imbalance handling explicitly off:
 Resume from the latest checkpoint:
 
 ```powershell
-.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --resume
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type role-transformer --resume
 ```
 
 Example with custom run directory, batch size, and epochs:
 
 ```powershell
-.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type mlp --run-dir training_runs\dense_exp_01 --batch-size 4096 --max-epochs 60 --checkpoint-interval 5
+.\.venv\Scripts\python.exe train_dense_embedding_classifier.py --model-type role-transformer --run-dir training_runs\dense_exp_01 --batch-size 4096 --max-epochs 60 --checkpoint-interval 5 --transformer-d-model 768 --transformer-num-layers 3
 ```
 
 Run dense-model ablations across model families and prefix dimensions:
@@ -210,13 +210,13 @@ bash run_xgboost_ablation.sh
 Custom model families and ablation dimensions:
 
 ```bash
-bash run_xgboost_ablation.sh --model-types logreg,mlp --dims 256,512,1024
+bash run_xgboost_ablation.sh --model-types logreg,role-transformer --dims 256,512,1024
 ```
 
-Run a wider MLP architecture sweep:
+Run a wider transformer architecture sweep:
 
 ```bash
-bash run_xgboost_ablation.sh --model-types mlp --mlp-configs "1024,512@0.1;1536,768@0.15;2048,1024@0.2"
+bash run_xgboost_ablation.sh --model-types role-transformer --transformer-configs "512,8,2,4,0.1;768,8,3,4,0.1"
 ```
 
 ### Training Outputs
@@ -255,9 +255,9 @@ Inside the run directory, for example `training_runs/dense_embedding_classifier/
 - cold-start handling: zero user embedding prefix when no user embedding is available
 - default embedding prefix dim: `1024`
 - default model family: `logreg`
-- alternative model family: `mlp`
+- alternative model family: `role-transformer`
 - default label order: `Go -> Interesting -> Why not -> Not interesting -> Out of scope`
-- MLP ablations can sweep multiple hidden-layer/dropout configurations
+- transformer ablations can sweep multiple depth/width/head/dropout configurations
 - class imbalance handling: `off` by default, optional `balanced-sample-weight`
 - evaluation split for model selection: `valid`
 - predictions: class probabilities plus top predicted label

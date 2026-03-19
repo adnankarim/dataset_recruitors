@@ -23,20 +23,22 @@ NUM_WORKERS="${NUM_WORKERS:-0}"
 HIDDEN_DIMS="${HIDDEN_DIMS:-1024,512}"
 DROPOUT="${DROPOUT:-0.1}"
 MLP_CONFIGS="${MLP_CONFIGS:-1024,512@0.1;1536,768@0.15;2048,1024@0.2}"
+TRANSFORMER_CONFIGS="${TRANSFORMER_CONFIGS:-512,8,2,4,0.1;768,8,3,4,0.1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
-MODEL_TYPES="logreg,mlp"
+MODEL_TYPES="logreg,role-transformer"
 DIMS="256,512,1024"
 IMBALANCE_MODES="off,balanced-sample-weight"
 
 usage() {
   cat <<EOF
-Usage: bash run_xgboost_ablation.sh [--model-types logreg,mlp] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight] [--mlp-configs 1024,512@0.1;1536,768@0.15]
+Usage: bash run_xgboost_ablation.sh [--model-types logreg,role-transformer] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight] [--transformer-configs 512,8,2,4,0.1;768,8,3,4,0.1]
 
 Options:
-  --model-types        Comma-separated dense model families to evaluate. Default: logreg,mlp
+  --model-types        Comma-separated dense model families to evaluate. Default: logreg,role-transformer
   --dims               Comma-separated embedding prefix dimensions to evaluate. Default: 256,512,1024
   --imbalance-modes    Comma-separated imbalance modes. Default: off,balanced-sample-weight
   --mlp-configs        Semicolon-separated hidden-dim/dropout specs for mlp. Format: hidden1,hidden2@dropout
+  --transformer-configs Semicolon-separated transformer specs. Format: d_model,num_heads,num_layers,ff_mult,dropout
 EOF
 }
 
@@ -56,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mlp-configs)
       MLP_CONFIGS="$2"
+      shift 2
+      ;;
+    --transformer-configs)
+      TRANSFORMER_CONFIGS="$2"
       shift 2
       ;;
     -h|--help)
@@ -93,6 +99,7 @@ echo "Model types:       $MODEL_TYPES"
 echo "Embedding dims:    $DIMS"
 echo "Imbalance modes:   $IMBALANCE_MODES"
 echo "MLP configs:       $MLP_CONFIGS"
+echo "Transformer cfgs:  $TRANSFORMER_CONFIGS"
 
 failures=()
 
@@ -103,6 +110,10 @@ run_experiment() {
   local prefix_dim="$4"
   local hidden_dims="$5"
   local dropout="$6"
+  local transformer_d_model="$7"
+  local transformer_num_heads="$8"
+  local transformer_num_layers="$9"
+  local transformer_ff_mult="${10}"
   local run_dir="$RUNS_DIR/$name"
   local log_path="$LOGS_DIR/$name.log"
   local calibration_target="$CALIBRATION_DIR/${name}_calibration.png"
@@ -119,6 +130,12 @@ run_experiment() {
   if [[ "$model_type" == "mlp" ]]; then
     echo "Hidden dims:       $hidden_dims"
     echo "Dropout:           $dropout"
+  elif [[ "$model_type" == "role-transformer" ]]; then
+    echo "Transformer d_model: $transformer_d_model"
+    echo "Transformer heads:   $transformer_num_heads"
+    echo "Transformer layers:  $transformer_num_layers"
+    echo "Transformer ff_mult: $transformer_ff_mult"
+    echo "Dropout:             $dropout"
   fi
   echo "Run dir:           $run_dir"
   echo "============================================================"
@@ -141,6 +158,14 @@ run_experiment() {
   )
   if [[ "$model_type" == "mlp" ]]; then
     cmd+=(--hidden-dims "$hidden_dims" --dropout "$dropout")
+  elif [[ "$model_type" == "role-transformer" ]]; then
+    cmd+=(
+      --transformer-d-model "$transformer_d_model"
+      --transformer-num-heads "$transformer_num_heads"
+      --transformer-num-layers "$transformer_num_layers"
+      --transformer-ff-mult "$transformer_ff_mult"
+      --dropout "$dropout"
+    )
   fi
 
   if "${cmd[@]}" \
@@ -174,7 +199,24 @@ for model_type in "${MODEL_VALUES[@]}"; do
         for imbalance in "${IMBALANCE_VALUES[@]}"; do
           imbalance="$(echo "$imbalance" | xargs)"
           [[ -n "$imbalance" ]] || continue
-          run_experiment "${config_label}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim" "$hidden_dims" "$dropout"
+          run_experiment "${config_label}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim" "$hidden_dims" "$dropout" "" "" "" ""
+        done
+      done
+    done
+  elif [[ "$model_type" == "role-transformer" ]]; then
+    IFS=';' read -r -a TRANSFORMER_CONFIG_VALUES <<<"$TRANSFORMER_CONFIGS"
+    for config in "${TRANSFORMER_CONFIG_VALUES[@]}"; do
+      config="$(echo "$config" | xargs)"
+      [[ -n "$config" ]] || continue
+      IFS=',' read -r transformer_d_model transformer_num_heads transformer_num_layers transformer_ff_mult dropout <<<"$config"
+      transformer_label="trf_${transformer_d_model}d_${transformer_num_heads}h_${transformer_num_layers}l_ff${transformer_ff_mult}_d$(echo "$dropout" | tr -d '.')"
+      for dim in "${DIM_VALUES[@]}"; do
+        dim="$(echo "$dim" | xargs)"
+        [[ -n "$dim" ]] || continue
+        for imbalance in "${IMBALANCE_VALUES[@]}"; do
+          imbalance="$(echo "$imbalance" | xargs)"
+          [[ -n "$imbalance" ]] || continue
+          run_experiment "${transformer_label}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim" "" "$dropout" "$transformer_d_model" "$transformer_num_heads" "$transformer_num_layers" "$transformer_ff_mult"
         done
       done
     done
@@ -185,7 +227,7 @@ for model_type in "${MODEL_VALUES[@]}"; do
       for imbalance in "${IMBALANCE_VALUES[@]}"; do
         imbalance="$(echo "$imbalance" | xargs)"
         [[ -n "$imbalance" ]] || continue
-        run_experiment "${model_type}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim" "" "0.0"
+        run_experiment "${model_type}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim" "" "0.0" "" "" "" ""
       done
     done
   fi

@@ -643,6 +643,56 @@ class DenseMLP(nn.Module):
         return self.network(inputs)
 
 
+class RoleAwareTransformerClassifier(nn.Module):
+    def __init__(
+        self,
+        role_dim: int,
+        num_classes: int,
+        model_dim: int,
+        num_heads: int,
+        num_layers: int,
+        ff_mult: int,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        if model_dim % num_heads != 0:
+            raise ValueError("transformer-d-model must be divisible by transformer-num-heads.")
+        self.role_dim = role_dim
+        self.input_proj = nn.Linear(role_dim, model_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, model_dim))
+        self.role_embedding = nn.Parameter(torch.zeros(1, 4, model_dim))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=num_heads,
+            dim_feedforward=model_dim * ff_mult,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(model_dim)
+        self.head = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(model_dim, num_classes),
+        )
+        nn.init.normal_(self.cls_token, std=0.02)
+        nn.init.normal_(self.role_embedding, std=0.02)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        batch_size = inputs.shape[0]
+        roles = inputs.view(batch_size, 3, self.role_dim)
+        roles = self.input_proj(roles)
+        cls = self.cls_token.expand(batch_size, -1, -1)
+        tokens = torch.cat([cls, roles], dim=1)
+        tokens = tokens + self.role_embedding[:, : tokens.shape[1], :]
+        encoded = self.encoder(tokens)
+        pooled = self.norm(encoded[:, 0])
+        return self.head(pooled)
+
+
 def create_model(args: argparse.Namespace, input_dim: int, num_classes: int) -> nn.Module:
     if args.model_type == "logreg":
         return MultinomialLogReg(input_dim=input_dim, num_classes=num_classes)
@@ -653,13 +703,27 @@ def create_model(args: argparse.Namespace, input_dim: int, num_classes: int) -> 
             num_classes=num_classes,
             dropout=args.dropout,
         )
+    if args.model_type == "role-transformer":
+        return RoleAwareTransformerClassifier(
+            role_dim=args.embedding_prefix_dim,
+            num_classes=num_classes,
+            model_dim=args.transformer_d_model,
+            num_heads=args.transformer_num_heads,
+            num_layers=args.transformer_num_layers,
+            ff_mult=args.transformer_ff_mult,
+            dropout=args.dropout,
+        )
     raise ValueError(f"Unsupported model type: {args.model_type}")
 
 
 def resolve_learning_rate(args: argparse.Namespace) -> float:
     if args.learning_rate is not None:
         return float(args.learning_rate)
-    return 5e-3 if args.model_type == "logreg" else 1e-3
+    if args.model_type == "logreg":
+        return 5e-3
+    if args.model_type == "role-transformer":
+        return 5e-4
+    return 1e-3
 
 
 def resolve_device(device_name: str) -> torch.device:
@@ -835,6 +899,10 @@ def save_feature_importance(
         weights = model.classifier.weight.detach().cpu().numpy()
         importance = np.abs(weights).mean(axis=0)
         method = "mean_abs_logit_weight"
+    elif model_type == "role-transformer":
+        projection_weights = model.input_proj.weight.detach().cpu().numpy()
+        importance = np.abs(projection_weights).mean(axis=0)
+        method = "mean_abs_role_projection_weight"
     else:
         first_layer_weights = model.input_layer.weight.detach().cpu().numpy()
         importance = np.abs(first_layer_weights).mean(axis=0)
@@ -899,7 +967,11 @@ def training_summary(
         "learning_rate": safe_round(resolved_learning_rate),
         "weight_decay": safe_round(args.weight_decay),
         "dropout": safe_round(args.dropout),
-        "hidden_dims": [] if args.model_type == "logreg" else parse_int_list(args.hidden_dims),
+        "hidden_dims": parse_int_list(args.hidden_dims) if args.model_type == "mlp" else [],
+        "transformer_d_model": int(args.transformer_d_model),
+        "transformer_num_heads": int(args.transformer_num_heads),
+        "transformer_num_layers": int(args.transformer_num_layers),
+        "transformer_ff_mult": int(args.transformer_ff_mult),
         "selection_metric": args.selection_metric,
         "best_epoch": int(best_epoch),
         "device": device_name,
@@ -926,7 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-col", default="label_weight")
     parser.add_argument("--metadata-cols", default=DEFAULT_METADATA_COLUMNS)
     parser.add_argument("--label-order", default=DEFAULT_LABEL_ORDER)
-    parser.add_argument("--model-type", default="logreg", choices=["logreg", "mlp"])
+    parser.add_argument("--model-type", default="logreg", choices=["logreg", "mlp", "role-transformer"])
     parser.add_argument("--embedding-prefix-dim", type=positive_int, default=1024)
     parser.add_argument("--batch-size", type=positive_int, default=2048)
     parser.add_argument("--max-epochs", type=positive_int, default=40)
@@ -936,6 +1008,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=non_negative_float, default=1e-4)
     parser.add_argument("--dropout", type=non_negative_float, default=0.1)
     parser.add_argument("--hidden-dims", default="1024,512")
+    parser.add_argument("--transformer-d-model", type=positive_int, default=512)
+    parser.add_argument("--transformer-num-heads", type=positive_int, default=8)
+    parser.add_argument("--transformer-num-layers", type=positive_int, default=3)
+    parser.add_argument("--transformer-ff-mult", type=positive_int, default=4)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--num-workers", type=non_negative_int, default=0)
     parser.add_argument("--seed", type=int, default=42)
