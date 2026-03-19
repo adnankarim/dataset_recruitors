@@ -136,9 +136,17 @@ Detected target classes in this dataset:
 
 - `Go`
 - `Interesting`
+- `Why not`
 - `Not interesting`
 - `Out of scope`
+
+The trainer now uses this explicit label order by default:
+
+- `Go`
+- `Interesting`
 - `Why not`
+- `Not interesting`
+- `Out of scope`
 
 By default the trainer:
 
@@ -205,6 +213,12 @@ Custom model families and ablation dimensions:
 bash run_xgboost_ablation.sh --model-types logreg,mlp --dims 256,512,1024
 ```
 
+Run a wider MLP architecture sweep:
+
+```bash
+bash run_xgboost_ablation.sh --model-types mlp --mlp-configs "1024,512@0.1;1536,768@0.15;2048,1024@0.2"
+```
+
 ### Training Outputs
 
 Inside the run directory, for example `training_runs/dense_embedding_classifier/`:
@@ -242,6 +256,8 @@ Inside the run directory, for example `training_runs/dense_embedding_classifier/
 - default embedding prefix dim: `1024`
 - default model family: `logreg`
 - alternative model family: `mlp`
+- default label order: `Go -> Interesting -> Why not -> Not interesting -> Out of scope`
+- MLP ablations can sweep multiple hidden-layer/dropout configurations
 - class imbalance handling: `off` by default, optional `balanced-sample-weight`
 - evaluation split for model selection: `valid`
 - predictions: class probabilities plus top predicted label

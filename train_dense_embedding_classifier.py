@@ -48,6 +48,7 @@ DEFAULT_FEATURE_DIR = str(BASE_DIR / "output" / "feature_splits")
 DEFAULT_STORE_DIR = str(BASE_DIR / "output" / "store")
 DEFAULT_RUN_DIR = str(BASE_DIR / "training_runs" / "dense_embedding_classifier")
 DEFAULT_METADATA_COLUMNS = "event_id,user_id,search_id,profil_id,split"
+DEFAULT_LABEL_ORDER = "Go,Interesting,Why not,Not interesting,Out of scope"
 MIN_SAMPLE_WEIGHT = 1e-6
 INT8_SCALE = 127.0
 EMBEDDING_ID_COLUMNS = ("query_text_id", "user_text_id", "candidate_text_id")
@@ -199,9 +200,16 @@ def split_labels_and_metadata(
     return labels, weights, metadata
 
 
-def infer_label_classes(y: np.ndarray) -> list[str]:
+def infer_label_classes(y: np.ndarray, preferred_order: list[str] | None = None) -> list[str]:
     values = pd.Series(y).dropna().astype(str)
-    unique_values = sorted(values.unique().tolist())
+    unique_values = values.unique().tolist()
+    if preferred_order:
+        preferred_set = set(preferred_order)
+        ordered = [label for label in preferred_order if label in unique_values]
+        remaining = sorted(label for label in unique_values if label not in preferred_set)
+        unique_values = ordered + remaining
+    else:
+        unique_values = sorted(unique_values)
     if len(unique_values) < 2:
         raise ValueError(f"Expected at least 2 unique labels. Found: {unique_values}")
     return unique_values
@@ -875,6 +883,8 @@ def training_summary(
         "evaluation_weight_policy": "unweighted metrics and unweighted validation early stopping",
         "feature_source": "raw query/user/candidate embedding prefixes",
         "store_dir": str(Path(args.store_dir).resolve()),
+        "label_order": parse_csv_list(args.label_order),
+        "label_order_policy": "explicit preferred order with sorted fallback for unseen labels",
         "model_type": args.model_type,
         "embedding_prefix_dim": args.embedding_prefix_dim,
         "input_scaling": "int8 embeddings divided by 127.0 before modeling",
@@ -915,6 +925,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-col", default="label")
     parser.add_argument("--weight-col", default="label_weight")
     parser.add_argument("--metadata-cols", default=DEFAULT_METADATA_COLUMNS)
+    parser.add_argument("--label-order", default=DEFAULT_LABEL_ORDER)
     parser.add_argument("--model-type", default="logreg", choices=["logreg", "mlp"])
     parser.add_argument("--embedding-prefix-dim", type=positive_int, default=1024)
     parser.add_argument("--batch-size", type=positive_int, default=2048)
@@ -1011,7 +1022,8 @@ def main() -> None:
     if labels_by_split["train"] is None or labels_by_split["valid"] is None:
         raise ValueError("Train and valid splits must contain the target column.")
 
-    class_names = infer_label_classes(labels_by_split["train"])
+    label_order = parse_csv_list(args.label_order)
+    class_names = infer_label_classes(labels_by_split["train"], preferred_order=label_order)
     class_to_index = {label: index for index, label in enumerate(class_names)}
     encoded_labels_by_split = {
         split_name: encode_labels(labels, class_to_index) for split_name, labels in labels_by_split.items()
@@ -1042,6 +1054,8 @@ def main() -> None:
         {
             "class_names": class_names,
             "class_to_index": class_to_index,
+            "label_order": label_order,
+            "label_order_policy": "explicit preferred order with sorted fallback for unseen labels",
             "class_weight_map": class_weight_map,
         },
     )
@@ -1053,6 +1067,7 @@ def main() -> None:
             "feature_source": "raw query/user/candidate embedding prefixes",
             "embedding_prefix_dim": args.embedding_prefix_dim,
             "feature_count": len(feature_columns),
+            "label_order": label_order,
             "input_scaling": "int8 embeddings divided by 127.0",
             "coldstart_user_embedding_policy": "user embedding prefix is zeroed when embedding_user_available == 0 or is_coldstart == 1",
             "coldstart_zeroed_rows": coldstart_zeroed_rows,

@@ -22,6 +22,7 @@ SEED="${SEED:-42}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 HIDDEN_DIMS="${HIDDEN_DIMS:-1024,512}"
 DROPOUT="${DROPOUT:-0.1}"
+MLP_CONFIGS="${MLP_CONFIGS:-1024,512@0.1;1536,768@0.15;2048,1024@0.2}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 MODEL_TYPES="logreg,mlp"
 DIMS="256,512,1024"
@@ -29,12 +30,13 @@ IMBALANCE_MODES="off,balanced-sample-weight"
 
 usage() {
   cat <<EOF
-Usage: bash run_xgboost_ablation.sh [--model-types logreg,mlp] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight]
+Usage: bash run_xgboost_ablation.sh [--model-types logreg,mlp] [--dims 256,512,1024] [--imbalance-modes off,balanced-sample-weight] [--mlp-configs 1024,512@0.1;1536,768@0.15]
 
 Options:
   --model-types        Comma-separated dense model families to evaluate. Default: logreg,mlp
   --dims               Comma-separated embedding prefix dimensions to evaluate. Default: 256,512,1024
   --imbalance-modes    Comma-separated imbalance modes. Default: off,balanced-sample-weight
+  --mlp-configs        Semicolon-separated hidden-dim/dropout specs for mlp. Format: hidden1,hidden2@dropout
 EOF
 }
 
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --imbalance-modes)
       IMBALANCE_MODES="$2"
+      shift 2
+      ;;
+    --mlp-configs)
+      MLP_CONFIGS="$2"
       shift 2
       ;;
     -h|--help)
@@ -86,6 +92,7 @@ echo "Using python:      $PYTHON_BIN"
 echo "Model types:       $MODEL_TYPES"
 echo "Embedding dims:    $DIMS"
 echo "Imbalance modes:   $IMBALANCE_MODES"
+echo "MLP configs:       $MLP_CONFIGS"
 
 failures=()
 
@@ -94,6 +101,8 @@ run_experiment() {
   local model_type="$2"
   local imbalance="$3"
   local prefix_dim="$4"
+  local hidden_dims="$5"
+  local dropout="$6"
   local run_dir="$RUNS_DIR/$name"
   local log_path="$LOGS_DIR/$name.log"
   local calibration_target="$CALIBRATION_DIR/${name}_calibration.png"
@@ -107,25 +116,34 @@ run_experiment() {
   echo "Model type:        $model_type"
   echo "Class imbalance:   $imbalance"
   echo "Embedding dim:     $prefix_dim"
+  if [[ "$model_type" == "mlp" ]]; then
+    echo "Hidden dims:       $hidden_dims"
+    echo "Dropout:           $dropout"
+  fi
   echo "Run dir:           $run_dir"
   echo "============================================================"
 
-  if "$PYTHON_BIN" "$ROOT_DIR/train_dense_embedding_classifier.py" \
-    --feature-dir "$FEATURE_DIR" \
-    --store-dir "$STORE_DIR" \
-    --run-dir "$run_dir" \
-    --model-type "$model_type" \
-    --embedding-prefix-dim "$prefix_dim" \
-    --class-imbalance-handling "$imbalance" \
-    --device "$DEVICE" \
-    --batch-size "$BATCH_SIZE" \
-    --max-epochs "$MAX_EPOCHS" \
-    --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-    --checkpoint-interval "$CHECKPOINT_INTERVAL" \
-    --num-workers "$NUM_WORKERS" \
-    --hidden-dims "$HIDDEN_DIMS" \
-    --dropout "$DROPOUT" \
-    --seed "$SEED" \
+  local cmd=(
+    "$PYTHON_BIN" "$ROOT_DIR/train_dense_embedding_classifier.py"
+    --feature-dir "$FEATURE_DIR"
+    --store-dir "$STORE_DIR"
+    --run-dir "$run_dir"
+    --model-type "$model_type"
+    --embedding-prefix-dim "$prefix_dim"
+    --class-imbalance-handling "$imbalance"
+    --device "$DEVICE"
+    --batch-size "$BATCH_SIZE"
+    --max-epochs "$MAX_EPOCHS"
+    --early-stopping-patience "$EARLY_STOPPING_PATIENCE"
+    --checkpoint-interval "$CHECKPOINT_INTERVAL"
+    --num-workers "$NUM_WORKERS"
+    --seed "$SEED"
+  )
+  if [[ "$model_type" == "mlp" ]]; then
+    cmd+=(--hidden-dims "$hidden_dims" --dropout "$dropout")
+  fi
+
+  if "${cmd[@]}" \
     ${EXTRA_ARGS} 2>&1 | tee "$log_path"; then
     if [[ -f "$run_dir/plots/calibration_curves.png" ]]; then
       cp "$run_dir/plots/calibration_curves.png" "$calibration_target"
@@ -142,15 +160,35 @@ run_experiment() {
 for model_type in "${MODEL_VALUES[@]}"; do
   model_type="$(echo "$model_type" | xargs)"
   [[ -n "$model_type" ]] || continue
-  for dim in "${DIM_VALUES[@]}"; do
-    dim="$(echo "$dim" | xargs)"
-    [[ -n "$dim" ]] || continue
-    for imbalance in "${IMBALANCE_VALUES[@]}"; do
-      imbalance="$(echo "$imbalance" | xargs)"
-      [[ -n "$imbalance" ]] || continue
-      run_experiment "${model_type}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim"
+  if [[ "$model_type" == "mlp" ]]; then
+    IFS=';' read -r -a MLP_CONFIG_VALUES <<<"$MLP_CONFIGS"
+    for config in "${MLP_CONFIG_VALUES[@]}"; do
+      config="$(echo "$config" | xargs)"
+      [[ -n "$config" ]] || continue
+      hidden_dims="${config%@*}"
+      dropout="${config#*@}"
+      config_label="mlp_$(echo "$hidden_dims" | tr ',' 'x')_d$(echo "$dropout" | tr -d '.')"
+      for dim in "${DIM_VALUES[@]}"; do
+        dim="$(echo "$dim" | xargs)"
+        [[ -n "$dim" ]] || continue
+        for imbalance in "${IMBALANCE_VALUES[@]}"; do
+          imbalance="$(echo "$imbalance" | xargs)"
+          [[ -n "$imbalance" ]] || continue
+          run_experiment "${config_label}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim" "$hidden_dims" "$dropout"
+        done
+      done
     done
-  done
+  else
+    for dim in "${DIM_VALUES[@]}"; do
+      dim="$(echo "$dim" | xargs)"
+      [[ -n "$dim" ]] || continue
+      for imbalance in "${IMBALANCE_VALUES[@]}"; do
+        imbalance="$(echo "$imbalance" | xargs)"
+        [[ -n "$imbalance" ]] || continue
+        run_experiment "${model_type}_rawdim${dim}_${imbalance//-/_}" "$model_type" "$imbalance" "$dim" "" "0.0"
+      done
+    done
+  fi
 done
 
 "$PYTHON_BIN" - "$MANIFEST_PATH" "$SUMMARY_CSV" "$SUMMARY_MD" "$CALIBRATION_INDEX" <<'PY'
