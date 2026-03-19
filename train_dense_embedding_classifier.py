@@ -50,7 +50,7 @@ DEFAULT_RUN_DIR = str(BASE_DIR / "training_runs" / "dense_embedding_classifier")
 DEFAULT_METADATA_COLUMNS = "event_id,user_id,search_id,profil_id,split"
 DEFAULT_LABEL_ORDER = "Go,Interesting,Why not,Not interesting,Out of scope"
 DEFAULT_MERGED_LABEL_ORDER = "Go,Interesting / Why not,Not interesting / Out of scope"
-DEFAULT_BINARY_LABEL_ORDER = "Go / Interesting / Why not,Not interesting / Out of scope"
+DEFAULT_BINARY_LABEL_ORDER = "Go / Interesting / Why not / Not interesting,Out of scope"
 MIN_SAMPLE_WEIGHT = 1e-6
 INT8_SCALE = 127.0
 EMBEDDING_ID_COLUMNS = ("query_text_id", "user_text_id", "candidate_text_id")
@@ -62,11 +62,11 @@ MERGED_THREE_LABEL_MAP = {
     "Out of scope": "Not interesting / Out of scope",
 }
 MERGED_TWO_LABEL_MAP = {
-    "Go": "Go / Interesting / Why not",
-    "Interesting": "Go / Interesting / Why not",
-    "Why not": "Go / Interesting / Why not",
-    "Not interesting": "Not interesting / Out of scope",
-    "Out of scope": "Not interesting / Out of scope",
+    "Go": "Go / Interesting / Why not / Not interesting",
+    "Interesting": "Go / Interesting / Why not / Not interesting",
+    "Why not": "Go / Interesting / Why not / Not interesting",
+    "Not interesting": "Go / Interesting / Why not / Not interesting",
+    "Out of scope": "Out of scope",
 }
 
 

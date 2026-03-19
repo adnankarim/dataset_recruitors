@@ -286,8 +286,8 @@ Inside the run directory, for example `training_runs/dense_embedding_classifier/
   `Interesting / Why not`
   `Not interesting / Out of scope`
 - optional merged 2-class mode:
-  `Go / Interesting / Why not`
-  `Not interesting / Out of scope`
+  `Go / Interesting / Why not / Not interesting`
+  `Out of scope`
 - transformer ablations can sweep multiple depth/width/head/dropout configurations
 - class imbalance handling: `off` by default, optional `balanced-sample-weight`
 - evaluation split for model selection: `valid`
